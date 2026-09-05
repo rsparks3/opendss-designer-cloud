@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opendss-designer-gateway"
-version = "0.2.0"
+version = "0.3.0"
 description = "Gateway for a hosted OpenDSS Designer: solver queue, plans, engine-time metering."
 readme = "README.md"
 license = "AGPL-3.0-or-later"

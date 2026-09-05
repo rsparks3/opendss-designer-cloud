@@ -17,10 +17,11 @@ The half of the contract the *worker* implements (the trusted limits header,
 `X-Engine-Seconds`, request ids) is documented in the app's
 [deployment guide](https://opendssdesigner-docs.ryanmsparks.com/deployment/).
 
-**Status: v0.2, guests and free accounts.** A guest is keyed by client
-address with a daily engine-time budget. Signing in (email magic link, GitHub
-or Google; no passwords) moves a caller to the Free plan with a monthly
-budget. Paid plans are the next stage.
+**Status: v0.3, guests, free accounts and a paid plan.** A guest is keyed by
+client address with a daily engine-time budget. Signing in (email magic link,
+GitHub or Google; no passwords) moves a caller to the Free plan. A Stripe
+subscription moves them to Pro. With no Stripe keys the billing routes do not
+exist and self-hosters see no Upgrade button.
 
 ## What it does per request
 
@@ -32,6 +33,7 @@ budget. Paid plans are the next stage.
 | `/gw/health` | – | the gateway's own liveness: workers, in-flight, queued, draining |
 | `/api/me` | – | who the caller is and their usage, as JSON |
 | `/auth/*`, `/account`, `/legal/*` | – | sign-in, the account page, privacy and terms, served by the gateway itself |
+| `/billing/*` | – | Stripe Checkout, the Customer Portal, the success page, and the webhook |
 
 The client's own copy of the limits header is always dropped. Circuits are
 never stored: bodies are forwarded and forgotten. The ledger holds a client
@@ -72,6 +74,19 @@ sign-in page says so.
 What is stored: email, optional display name, sign-in identities (provider +
 stable id), plan, and the usage ledger keyed to the user. Never circuits.
 
+## Billing
+
+Stripe, via its REST API over httpx (no SDK). `POST /billing/checkout` opens
+a Stripe-hosted Checkout for the configured monthly price; `POST
+/billing/portal` opens the Customer Portal for card changes and cancellation;
+`POST /billing/webhook` takes `checkout.session.completed` and the
+`customer.subscription.*` events, verified with the endpoint's signing secret
+and applied once per event id. The user's plan follows the subscription
+status: `active`, `trialing` and `past_due` (grace) are Pro, everything else
+is Free. The success page also confirms the session directly so the upgrade
+shows before the webhook arrives. Only a Stripe customer id, subscription id
+and status are stored.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -97,6 +112,10 @@ stable id), plan, and the usage ledger keyed to the user. Never circuits.
 | `EMAIL_FROM`, `RESEND_API_KEY`, `SMTP_URL` | unset | per mode |
 | `GATEWAY_MAGIC_PER_IP_HOUR` / `_PER_EMAIL_HOUR` | 6 / 3 | sign-in link rate limits |
 | `GATEWAY_OPERATOR_NAME`, `GATEWAY_SUPPORT_EMAIL` | unset | shown on the legal and account pages |
+| `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` | unset | both set ⇒ billing on |
+| `STRIPE_WEBHOOK_SECRET` | unset | the endpoint's signing secret (`whsec_…`) |
+| `STRIPE_AUTOMATIC_TAX` | off | ask Stripe Tax to add tax at checkout |
+| `GATEWAY_PRO_PRICE_TEXT` | `$5 / month` | shown next to the Upgrade button |
 
 Workers need `OPENDSS_DESIGNER_TRUSTED_LIMITS_HEADER=X-OpenDSS-Limits` and must
 not be reachable by anything but the gateway (and, for the static frontend,

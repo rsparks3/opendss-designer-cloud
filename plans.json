@@ -42,5 +42,27 @@
         "url": "/account"
       }
     ]
+  },
+  "pro": {
+    "name": "Pro",
+    "priority": 1,
+    "pool": "member",
+    "concurrency": 2,
+    "limits": {
+      "maxNodes": 1000,
+      "maxEdges": 2000,
+      "maxTimeseriesCost": 3000000,
+      "engineResultTimeoutS": 90,
+      "timeseriesTimeoutS": 600
+    },
+    "budget_seconds": 3600,
+    "budget_period": "month",
+    "message": "{used} of {budget} of solver time used {period}.",
+    "links": [
+      {
+        "label": "Account",
+        "url": "/account"
+      }
+    ]
   }
 }

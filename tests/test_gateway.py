@@ -166,4 +166,4 @@ def test_plans_file_may_carry_comments(tmp_path):
     spec = {"_comment": "live numbers; edit by hand", **guest_plan()}
     path = tmp_path / "plans.json"
     path.write_text(json.dumps(spec), encoding="utf-8")
-    assert sorted(load_plans(path)) == ["free", "guest"]
+    assert sorted(load_plans(path)) == ["free", "guest", "pro"]

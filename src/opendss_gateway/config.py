@@ -82,6 +82,15 @@ class Config:
     operator_name: str = "the operator"
     support_email: str = ""
 
+    # -- billing --------------------------------------------------------------
+    #: Stripe. Billing routes exist only when secret key and price id are set.
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_id: str = ""
+    stripe_automatic_tax: bool = False
+    #: Shown next to the Upgrade button; the real price lives in Stripe.
+    pro_price_text: str = "$5 / month"
+
     @property
     def guest_workers(self) -> int:
         n = self.guest_max_workers or len(self.workers)
@@ -135,5 +144,10 @@ class Config:
             magic_per_email_hour=_num(env.get("GATEWAY_MAGIC_PER_EMAIL_HOUR"),
                                       cls.magic_per_email_hour, int),
             operator_name=_str(env, "GATEWAY_OPERATOR_NAME", cls.operator_name),
+            stripe_secret_key=_str(env, "STRIPE_SECRET_KEY"),
+            stripe_webhook_secret=_str(env, "STRIPE_WEBHOOK_SECRET"),
+            stripe_price_id=_str(env, "STRIPE_PRICE_ID"),
+            stripe_automatic_tax=_bool(env.get("STRIPE_AUTOMATIC_TAX"), False),
+            pro_price_text=_str(env, "GATEWAY_PRO_PRICE_TEXT", cls.pro_price_text),
             support_email=_str(env, "GATEWAY_SUPPORT_EMAIL"),
         )

@@ -61,6 +61,21 @@ CREATE TABLE IF NOT EXISTS magic_tokens (
     created REAL NOT NULL,
     used REAL
 );
+CREATE TABLE IF NOT EXISTS subscriptions (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id),
+    customer_id TEXT NOT NULL,
+    subscription_id TEXT,
+    status TEXT NOT NULL DEFAULT 'none',
+    current_period_end REAL,
+    cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+    updated REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_customer ON subscriptions (customer_id);
+CREATE TABLE IF NOT EXISTS stripe_events (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    received REAL NOT NULL
+);
 """
 
 
@@ -202,3 +217,62 @@ class Users:
                 "UPDATE magic_tokens SET used=? WHERE nonce=? AND email=? AND used IS NULL",
                 (time.time(), nonce, email.lower()))
             return cur.rowcount == 1
+
+
+@dataclass(frozen=True)
+class Subscription:
+    user_id: int
+    customer_id: str
+    subscription_id: str | None
+    status: str
+    current_period_end: float | None
+    cancel_at_period_end: bool
+    updated: float
+
+
+class Subscriptions:
+    """One row per user who has ever reached Checkout; the plan is derived
+    from `status` (see billing.plan_for)."""
+
+    def __init__(self, store: Store):
+        self._s = store
+
+    @staticmethod
+    def _row(row: sqlite3.Row | None) -> Subscription | None:
+        if row is None:
+            return None
+        return Subscription(row["user_id"], row["customer_id"], row["subscription_id"],
+                            row["status"], row["current_period_end"],
+                            bool(row["cancel_at_period_end"]), row["updated"])
+
+    def get(self, user_id: int) -> Subscription | None:
+        with self._s.lock:
+            return self._row(self._s.db.execute(
+                "SELECT * FROM subscriptions WHERE user_id=?", (user_id,)).fetchone())
+
+    def by_customer(self, customer_id: str) -> Subscription | None:
+        with self._s.lock:
+            return self._row(self._s.db.execute(
+                "SELECT * FROM subscriptions WHERE customer_id=?", (customer_id,)).fetchone())
+
+    def upsert(self, *, user_id: int, customer_id: str, subscription_id: str | None,
+               status: str, current_period_end: float | None, cancel_at_period_end: bool) -> None:
+        with self._s.lock:
+            self._s.db.execute(
+                "INSERT INTO subscriptions (user_id, customer_id, subscription_id, status,"
+                " current_period_end, cancel_at_period_end, updated) VALUES (?,?,?,?,?,?,?)"
+                " ON CONFLICT(user_id) DO UPDATE SET customer_id=excluded.customer_id,"
+                " subscription_id=excluded.subscription_id, status=excluded.status,"
+                " current_period_end=excluded.current_period_end,"
+                " cancel_at_period_end=excluded.cancel_at_period_end, updated=excluded.updated",
+                (user_id, customer_id, subscription_id, status, current_period_end,
+                 int(cancel_at_period_end), time.time()))
+
+    def record_event(self, event_id: str, kind: str) -> bool:
+        """True the first time an event id is seen; False on a redelivery."""
+        with self._s.lock:
+            cur = self._s.db.execute(
+                "INSERT OR IGNORE INTO stripe_events (id, type, received) VALUES (?,?,?)",
+                (event_id, kind, time.time()))
+            return cur.rowcount == 1
+

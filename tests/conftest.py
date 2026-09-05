@@ -124,6 +124,47 @@ class FakeProvider:
                                      token="http://fake-google", openid="http://fake-google")]
 
 
+class FakeStripe:
+    """Just enough of Stripe's REST API for the checkout -> webhook -> portal
+    loop. Records what the gateway sent so tests can assert on it."""
+
+    def __init__(self):
+        self.checkouts: list[dict] = []
+        self.portals: list[dict] = []
+        self.session_status = {"status": "complete", "payment_status": "paid"}
+        self.subscription = {"id": "sub_1", "customer": "cus_1", "status": "active",
+                             "current_period_end": 4102444800, "cancel_at_period_end": False}
+        self.app = FastAPI()
+        app = self.app
+
+        @app.post("/v1/checkout/sessions")
+        async def create_checkout(request: Request):
+            form = dict(await request.form())
+            self.checkouts.append(form)
+            return {"id": "cs_1", "url": "https://checkout.stripe.test/cs_1", **form}
+
+        @app.get("/v1/checkout/sessions/{sid}")
+        async def get_checkout(sid: str):
+            ref = self.checkouts[-1].get("client_reference_id", "1") if self.checkouts else "1"
+            return {"id": sid, "mode": "subscription", "customer": "cus_1", "subscription": "sub_1",
+                    "client_reference_id": ref, **self.session_status}
+
+        @app.get("/v1/subscriptions/{sub_id}")
+        async def get_subscription(sub_id: str):
+            return {**self.subscription, "id": sub_id}
+
+        @app.post("/v1/billing_portal/sessions")
+        async def create_portal(request: Request):
+            form = dict(await request.form())
+            self.portals.append(form)
+            return {"id": "bps_1", "url": "https://billing.stripe.test/bps_1"}
+
+
+@pytest.fixture
+def fake_stripe() -> FakeStripe:
+    return FakeStripe()
+
+
 @pytest.fixture
 def fake_worker() -> FastAPI:
     return make_fake_worker()
@@ -135,7 +176,8 @@ def fake_provider() -> FakeProvider:
 
 
 @pytest.fixture
-def gateway_factory(tmp_path: Path, fake_worker: FastAPI, fake_provider: FakeProvider):
+def gateway_factory(tmp_path: Path, fake_worker: FastAPI, fake_provider: FakeProvider,
+                    fake_stripe: FakeStripe):
     """Build a gateway app against the fakes with overridden config."""
     apps = []
 
@@ -154,7 +196,8 @@ def gateway_factory(tmp_path: Path, fake_worker: FastAPI, fake_provider: FakePro
         cfg = Config(**{**defaults, **overrides})
         app = create_app(cfg, transport=httpx.ASGITransport(app=fake_worker),
                          oauth_transport=httpx.ASGITransport(app=fake_provider.app),
-                         providers=fake_provider.providers())
+                         providers=fake_provider.providers(),
+                         stripe_transport=httpx.ASGITransport(app=fake_stripe.app))
         apps.append(app)
         return app
 
@@ -179,4 +222,8 @@ def guest_plan(**overrides) -> dict:
             "limits": {"maxNodes": 500}, "budget_seconds": 30, "budget_period": "day",
             "message": "{used} of {budget} used {period}.",
             "links": [{"label": "Account", "url": "/account"}]}
-    return {"guest": guest, "free": free}
+    pro = {"name": "Pro", "priority": 1, "pool": "member", "concurrency": 2,
+           "limits": {"maxNodes": 1000}, "budget_seconds": 3600, "budget_period": "month",
+           "message": "{used} of {budget} used {period}.",
+           "links": [{"label": "Account", "url": "/account"}]}
+    return {"guest": guest, "free": free, "pro": pro}

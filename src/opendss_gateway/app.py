@@ -35,13 +35,13 @@ import httpx
 from fastapi import FastAPI, Form, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
-from . import __version__, auth, pages
+from . import __version__, auth, billing, pages
 from .config import Config
 from .ledger import Ledger
 from .mailer import Mailer, MailError, magic_link_text
 from .plans import Plan, load_plans
 from .scheduler import Draining, Job, Lease, QueueFull, QueueTimeout, Scheduler
-from .store import Store, User, Users
+from .store import Store, Subscriptions, User, Users
 
 logger = logging.getLogger(__name__)
 
@@ -98,12 +98,19 @@ class Gateway:
 
     def __init__(self, cfg: Config, transport: httpx.AsyncBaseTransport | None = None,
                  oauth_transport: httpx.AsyncBaseTransport | None = None,
-                 providers: list[auth.Provider] | None = None):
+                 providers: list[auth.Provider] | None = None,
+                 stripe_transport: httpx.AsyncBaseTransport | None = None):
         self.cfg = cfg
         self.plans: dict[str, Plan] = load_plans(cfg.plans_path)
         self.store = Store(cfg.db_path)
         self.ledger = Ledger(self.store)
         self.users = Users(self.store)
+        self.subscriptions = Subscriptions(self.store)
+        self.stripe = billing.Stripe(
+            secret_key=cfg.stripe_secret_key, webhook_secret=cfg.stripe_webhook_secret,
+            price_id=cfg.stripe_price_id, automatic_tax=cfg.stripe_automatic_tax,
+            client=httpx.AsyncClient(base_url=billing.STRIPE_API, timeout=20.0,
+                                     transport=stripe_transport))
         self.scheduler = Scheduler(cfg.workers, {"guest": cfg.guest_workers},
                                   max_queue=cfg.max_queue, wait_s=cfg.queue_wait_s)
         self.client = httpx.AsyncClient(
@@ -130,6 +137,7 @@ class Gateway:
             logger.warning("shutting down with %d run(s) still in flight", left)
         await self.client.aclose()
         await self.oauth.aclose()
+        await self.stripe.client.aclose()
         self.store.close()
 
     # -- who is calling -----------------------------------------------------
@@ -237,14 +245,18 @@ def _page(html: str, status: int = 200) -> HTMLResponse:
 
 def create_app(cfg: Config, transport: httpx.AsyncBaseTransport | None = None,
                oauth_transport: httpx.AsyncBaseTransport | None = None,
-               providers: list[auth.Provider] | None = None) -> FastAPI:
-    gw = Gateway(cfg, transport, oauth_transport, providers)
+               providers: list[auth.Provider] | None = None,
+               stripe_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
+    gw = Gateway(cfg, transport, oauth_transport, providers, stripe_transport)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
-        logger.info("gateway %s: %d worker(s), guest pool %d, plans %s, providers %s, email %s",
-                    __version__, len(cfg.workers), cfg.guest_workers, sorted(gw.plans),
-                    sorted(gw.providers) or "none", cfg.email_mode)
+        logger.info("gateway %s: %d worker(s), guest pool %d, plans %s, providers %s, email %s, "
+                    "billing %s", __version__, len(cfg.workers), cfg.guest_workers,
+                    sorted(gw.plans), sorted(gw.providers) or "none", cfg.email_mode,
+                    "on" if gw.stripe.enabled else "off")
+        if gw.stripe.enabled and not cfg.stripe_webhook_secret:
+            logger.warning("STRIPE_WEBHOOK_SECRET unset: renewals and cancellations will not be seen")
         if cfg.email_mode == "log" and cfg.public_url.startswith("https://"):
             logger.warning("GATEWAY_EMAIL_MODE=log on a public URL: magic links go to the log, "
                            "not to people")
@@ -386,8 +398,110 @@ def create_app(cfg: Config, transport: httpx.AsyncBaseTransport | None = None,
         html = pages.account(caller.user, caller.plan, used, gw.users.identities(caller.user.id),
                              auth.csrf_token(gw.signer, caller.user.id),
                              recent=gw.ledger.recent(10, client=caller.client),
-                             support_email=cfg.support_email)
+                             support_email=cfg.support_email,
+                             billing={"enabled": gw.stripe.enabled,
+                                      "price_text": cfg.pro_price_text,
+                                      "subscription": gw.subscriptions.get(caller.user.id)},
+                             pro=gw.plans.get("pro"))
         return gw.finish(_page(html), caller)
+
+    # -- billing --------------------------------------------------------------
+
+    def _billing_off() -> Response:
+        return _page(pages.billing_message("Billing", "Paid plans are not available on this "
+                                           "instance.", error=True), 404)
+
+    @app.post("/billing/checkout")
+    async def billing_checkout(request: Request, csrf: str = Form("")) -> Response:
+        if not gw.stripe.enabled:
+            return _billing_off()
+        caller = gw.identify(request)
+        if caller.user is None:
+            return RedirectResponse("/auth/signin", status_code=303)
+        if not auth.check_csrf(gw.signer, csrf, caller.user.id):
+            return _page(pages.billing_message("Billing", "That form had expired. Try again.",
+                                               error=True), 400)
+        if caller.plan.id == "pro":
+            return RedirectResponse("/account", status_code=303)
+        sub = gw.subscriptions.get(caller.user.id)
+        try:
+            url = await gw.stripe.create_checkout(
+                user_id=caller.user.id, email=caller.user.email,
+                customer_id=sub.customer_id if sub else None,
+                success_url=f"{cfg.public_url}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+                cancel_url=f"{cfg.public_url}/account")
+        except billing.StripeError as exc:
+            return _page(pages.billing_message("Billing", str(exc), error=True), 502)
+        return RedirectResponse(url, status_code=303)
+
+    @app.get("/billing/success")
+    async def billing_success(request: Request, session_id: str = "") -> Response:
+        if not gw.stripe.enabled:
+            return _billing_off()
+        caller = gw.identify(request)
+        if caller.user is None:
+            return RedirectResponse("/auth/signin", status_code=303)
+        plan = None
+        if session_id:
+            try:
+                session = await gw.stripe.checkout_session(session_id)
+                if session.get("payment_status") in ("paid", "no_payment_required") and \
+                        str(session.get("client_reference_id")) == str(caller.user.id):
+                    plan = await billing.apply_checkout_session(
+                        gw.stripe, gw.subscriptions, gw.users, session)
+            except billing.StripeError as exc:
+                logger.warning("success page could not confirm %s: %s", session_id, exc)
+        if plan == "pro":
+            return _page(pages.billing_message(
+                "Welcome to Pro", "Your plan is active. The designer picks it up on the next "
+                "request; reload it if the banner still says Free."))
+        return _page(pages.billing_message(
+            "Almost there", "Stripe is still confirming the payment. Your account page will "
+            "show Pro within a minute; no need to pay again."))
+
+    @app.post("/billing/portal")
+    async def billing_portal(request: Request, csrf: str = Form("")) -> Response:
+        if not gw.stripe.enabled:
+            return _billing_off()
+        caller = gw.identify(request)
+        if caller.user is None:
+            return RedirectResponse("/auth/signin", status_code=303)
+        if not auth.check_csrf(gw.signer, csrf, caller.user.id):
+            return _page(pages.billing_message("Billing", "That form had expired. Try again.",
+                                               error=True), 400)
+        sub = gw.subscriptions.get(caller.user.id)
+        if sub is None:
+            return _page(pages.billing_message("Billing", "There is no subscription on this "
+                                               "account yet.", error=True), 404)
+        try:
+            url = await gw.stripe.create_portal(sub.customer_id, f"{cfg.public_url}/account")
+        except billing.StripeError as exc:
+            return _page(pages.billing_message("Billing", str(exc), error=True), 502)
+        return RedirectResponse(url, status_code=303)
+
+    @app.post("/billing/webhook")
+    async def billing_webhook(request: Request) -> Response:
+        if not gw.stripe.enabled:
+            return JSONResponse({"detail": "billing off"}, status_code=404)
+        payload = await request.body()
+        try:
+            billing.verify_signature(payload, request.headers.get("stripe-signature"),
+                                     cfg.stripe_webhook_secret)
+            event = json.loads(payload)
+        except (billing.StripeError, ValueError) as exc:
+            logger.warning("webhook rejected: %s", exc)
+            return JSONResponse({"detail": "bad signature"}, status_code=400)
+        event_id = str(event.get("id") or "")
+        if not event_id or not gw.subscriptions.record_event(event_id, str(event.get("type"))):
+            return JSONResponse({"received": True, "duplicate": True})
+        try:
+            outcome = await billing.apply_event(gw.stripe, gw.subscriptions, gw.users, event)
+        except billing.StripeError as exc:
+            # Tell Stripe to retry: the event is recorded, so undo that first.
+            logger.warning("webhook %s deferred: %s", event_id, exc)
+            return JSONResponse({"detail": str(exc)}, status_code=503)
+        logger.info("webhook %s %s: %s", event_id, event.get("type"), outcome)
+        return JSONResponse({"received": True, "outcome": outcome})
 
     @app.get("/legal/privacy")
     async def legal_privacy() -> Response:

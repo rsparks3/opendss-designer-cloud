@@ -87,6 +87,14 @@ DEFAULT_PLANS: dict[str, Plan] = {
         message="{used} of {budget} of solver time used {period}.",
         links=[{"label": "Account", "url": "/account"}],
     ),
+    "pro": Plan(
+        id="pro", name="Pro", priority=1,
+        limits={"maxNodes": 1000, "maxEdges": 2000, "maxTimeseriesCost": 3_000_000,
+                "engineResultTimeoutS": 90, "timeseriesTimeoutS": 600},
+        budget_seconds=60 * 60, budget_period="month", concurrency=2, pool="member",
+        message="{used} of {budget} of solver time used {period}.",
+        links=[{"label": "Account", "url": "/account"}],
+    ),
 }
 
 
@@ -99,7 +107,7 @@ def load_plans(path: Path | None) -> dict[str, Plan]:
         if pid.startswith("_") or not isinstance(spec, dict):
             continue  # "_comment" and friends: a plans file is edited by hand
         plans[pid] = Plan(id=pid, **spec)
-    for required in ("guest", "free"):
+    for required in ("guest", "free", "pro"):
         if required not in plans:
             raise ValueError(f"plans file must define a '{required}' plan")
     return plans

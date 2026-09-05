@@ -6,6 +6,7 @@ supplied goes through ``html.escape``.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from html import escape as h
 
 from .plans import Plan, _minutes
@@ -80,8 +81,45 @@ def message(title: str, text: str, *, error: bool = False, link: str = "/auth/si
 <p><a class="btn" href="{h(link)}">{h(link_text)}</a></p></div>""")
 
 
+def billing_section(plan: Plan, pro: Plan | None, billing: dict, csrf: str) -> str:
+    """Upgrade / manage-billing block for the account page. `billing` keys:
+    enabled, price_text, subscription (Subscription | None)."""
+    if not billing.get("enabled"):
+        return ""
+    sub = billing.get("subscription")
+    if plan.id == "pro" and sub is not None:
+        when_ = ""
+        if sub.current_period_end:
+            date = datetime.fromtimestamp(sub.current_period_end, UTC).strftime("%d %B %Y").lstrip("0")
+            when_ = (f"Access continues until {date}, then returns to Free." if sub.cancel_at_period_end
+                     else f"Renews on {date}.")
+        note = ('<p class="err">The last payment did not go through. Update the card under Manage billing '
+                'to keep Pro.</p>' if sub.status == "past_due" else "")
+        return f"""<h2>Billing</h2><p>{h(when_)}</p>{note}
+<form method="post" action="/billing/portal"><input type="hidden" name="csrf" value="{h(csrf)}">
+<button type="submit">Manage billing</button></form>
+<p><small>Change the card, download invoices, or cancel. Cancelling keeps Pro until the end of the paid period.</small></p>"""
+    if pro is None:
+        return ""
+    limits = pro.limits
+    return f"""<h2>Pro · {h(billing.get("price_text", ""))}</h2>
+<p>{int(limits.get("maxNodes", 0)):,} elements per circuit, time-series runs up to
+{limits.get("timeseriesTimeoutS", 0):g} s and cost {int(limits.get("maxTimeseriesCost", 0)):,},
+{h(_minutes(pro.budget_seconds or 0))} of solver time {h(pro.period_phrase())}, {pro.concurrency} runs at once,
+first in the queue.</p>
+<form method="post" action="/billing/checkout"><input type="hidden" name="csrf" value="{h(csrf)}">
+<button type="submit" class="primary">Upgrade to Pro</button></form>
+<p><small>Payment is handled by Stripe; no card details reach this site. Cancel any time from this page.</small></p>"""
+
+
+def billing_message(title: str, text: str, *, error: bool = False) -> str:
+    return message(title, text, error=error, link="/account", link_text="Back to your account")
+
+
 def account(user: User, plan: Plan, used: float, identities: list[Identity], csrf: str,
-            *, recent: list[dict], support_email: str) -> str:
+            *, recent: list[dict], support_email: str, billing: dict | None = None,
+            pro: Plan | None = None) -> str:
+    billing_html = billing_section(plan, pro, billing or {}, csrf)
     budget = plan.budget_seconds or 0
     pct = min(100, round(100 * used / budget)) if budget else 0
     usage = (f'<p>{h(_minutes(used))} of {h(_minutes(budget))} of solver time used {h(plan.period_phrase())}.</p>'
@@ -102,6 +140,7 @@ def account(user: User, plan: Plan, used: float, identities: list[Identity], csr
 <p>{h(user.email)}{(' · ' + h(user.name)) if user.name else ''}</p>
 <h2>{h(plan.name)} plan</h2>{usage}
 <table><tbody>{limits}</tbody></table>
+{billing_html}
 <h2>Sign-in methods</h2><table><tbody>{ids}</tbody></table>
 <p class="muted"><small>Signing in another way with the same email address links it to this account.</small></p>
 <h2>Recent runs</h2><table><thead><tr><th>Call</th><th>Engine time</th><th>Result</th></tr></thead><tbody>{runs}</tbody></table>
@@ -160,7 +199,9 @@ designer itself keeps your work in your own browser's storage, which never leave
 <h2>Third parties</h2>
 <p>Sign-in links are delivered by an email provider, which sees the address and the message. GitHub or Google, if
 you choose them, tell the service your verified email address and a stable identifier; the service asks for
-nothing else. Cloudflare sits in front of the site and sees traffic the way any CDN does. Optional data fetchers
+nothing else. Payments for the paid plan are taken by Stripe on Stripe's own pages: card details go to Stripe
+and never to this service, which keeps only a Stripe customer id, a subscription id and its status (active,
+past due, cancelled) so it knows which plan you are on. Cloudflare sits in front of the site and sees traffic the way any CDN does. Optional data fetchers
 in the designer (NREL load profiles, NSRDB irradiance) contact those public services only when you ask them to,
 and an NSRDB API key you enter is sent to NSRDB and cached results are shared; it is not stored by this service.</p>
 
@@ -210,10 +251,18 @@ may delete your account at any time by emailing {contact}.</p>
 check them before relying on them for any engineering decision. The operator is not liable for losses arising
 from the use of the service or its unavailability, to the fullest extent the law allows.</p>
 
+<h2>Paid plan and billing</h2>
+<p>The Pro plan is a monthly subscription billed by Stripe at the price shown at checkout, in advance, renewing
+automatically until cancelled. You can cancel at any time from your account page; access continues to the end
+of the period already paid for and no further charges are made. Payments already made are not refunded for
+partial periods, except where the law requires or where the service was unavailable for a substantial part of a
+period, in which case email {contact}. If a renewal payment fails, Pro continues for a short grace period while
+Stripe retries, after which the account returns to the Free plan. Prices and limits may change with notice on
+this page; a change applies from your next renewal.</p>
+
 <h2>Availability and changes</h2>
 <p>This is a small service run on modest hardware. It may be interrupted for maintenance or by failure, and the
-limits, plans and these terms may change; material changes are announced on this page with a new date. If a paid
-plan exists, its billing terms are shown at the point of purchase.</p>
+limits, plans and these terms may change; material changes are announced on this page with a new date.</p>
 
 <h2>Contact</h2>
 <p>{contact}.</p>
