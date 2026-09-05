@@ -97,6 +97,8 @@ def load_plans(path: Path | None) -> dict[str, Plan]:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     plans: dict[str, Plan] = {}
     for pid, spec in raw.items():
+        if pid.startswith("_") or not isinstance(spec, dict):
+            continue  # "_comment" and friends: a plans file is edited by hand
         plans[pid] = Plan(id=pid, **spec)
     for required in ("guest", "free"):
         if required not in plans:

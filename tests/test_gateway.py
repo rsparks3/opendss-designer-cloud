@@ -158,3 +158,12 @@ async def test_gateway_health_reports_queue_state(gateway):
     body = (await client.get("/gw/health")).json()
     assert body["ok"] is True and body["workers"] == 2
     assert body["inflight"] == 0 and body["queued"] == 0
+
+
+def test_plans_file_may_carry_comments(tmp_path):
+    from opendss_gateway.plans import load_plans
+    from tests.conftest import guest_plan
+    spec = {"_comment": "live numbers; edit by hand", **guest_plan()}
+    path = tmp_path / "plans.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    assert sorted(load_plans(path)) == ["free", "guest"]
