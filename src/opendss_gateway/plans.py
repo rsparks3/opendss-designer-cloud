@@ -76,8 +76,7 @@ DEFAULT_PLANS: dict[str, Plan] = {
         limits={"maxNodes": 500, "maxEdges": 1000, "maxTimeseriesCost": 250_000,
                 "engineResultTimeoutS": 30, "timeseriesTimeoutS": 30},
         budget_seconds=5 * 60, budget_period="day", concurrency=1, pool="guest",
-        message="No account needed. {used} of {budget} of solver time used {period}. "
-                "Sign in (free) for bigger circuits and longer runs.",
+        message="No account needed. {used} of {budget} of solver time used {period}.",
         links=[{"label": "Sign in", "url": "/auth/signin"}],
     ),
     "free": Plan(

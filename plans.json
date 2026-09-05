@@ -13,7 +13,7 @@
     },
     "budget_seconds": 300,
     "budget_period": "day",
-    "message": "No account needed. {used} of {budget} of solver time used {period}. Sign in (free) for bigger circuits and longer runs.",
+    "message": "No account needed. {used} of {budget} of solver time used {period}.",
     "links": [{ "label": "Sign in", "url": "/auth/signin" }]
   },
   "free": {
