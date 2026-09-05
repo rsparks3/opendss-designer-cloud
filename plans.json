@@ -11,10 +11,15 @@
       "engineResultTimeoutS": 30,
       "timeseriesTimeoutS": 30
     },
-    "budget_seconds": 300,
+    "budget_seconds": 30,
     "budget_period": "day",
     "message": "No account needed. {used} of {budget} of solver time used {period}.",
-    "links": [{ "label": "Sign in", "url": "/auth/signin" }]
+    "links": [
+      {
+        "label": "Sign in",
+        "url": "/auth/signin"
+      }
+    ]
   },
   "free": {
     "name": "Free",
@@ -28,9 +33,14 @@
       "engineResultTimeoutS": 90,
       "timeseriesTimeoutS": 90
     },
-    "budget_seconds": 1200,
-    "budget_period": "month",
+    "budget_seconds": 300,
+    "budget_period": "day",
     "message": "{used} of {budget} of solver time used {period}.",
-    "links": [{ "label": "Account", "url": "/account" }]
+    "links": [
+      {
+        "label": "Account",
+        "url": "/account"
+      }
+    ]
   }
 }

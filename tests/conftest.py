@@ -176,7 +176,7 @@ def guest_plan(**overrides) -> dict:
              "message": "{used} of {budget} used {period}.", "links": []}
     guest.update(overrides)
     free = {"name": "Free", "priority": 5, "pool": "member", "concurrency": 1,
-            "limits": {"maxNodes": 500}, "budget_seconds": 1200, "budget_period": "month",
+            "limits": {"maxNodes": 500}, "budget_seconds": 300, "budget_period": "day",
             "message": "{used} of {budget} used {period}.",
             "links": [{"label": "Account", "url": "/account"}]}
     return {"guest": guest, "free": free}

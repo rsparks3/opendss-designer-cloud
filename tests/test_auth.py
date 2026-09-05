@@ -74,8 +74,8 @@ async def test_magic_link_signs_in_and_switches_plan(gateway):
     me = (await client.get("/api/me")).json()
     assert me == {"signedIn": True, "email": "ryan@example.com", "name": None,
                   "plan": {"id": "free", "name": "Free"},
-                  "usage": {"engineSeconds": 0.0, "budgetSeconds": 1200,
-                            "period": me["usage"]["period"], "resets": "this month"}}
+                  "usage": {"engineSeconds": 0.0, "budgetSeconds": 300,
+                            "period": me["usage"]["period"], "resets": "today"}}
 
 
 async def test_magic_link_is_single_use_and_bound_to_the_email(gateway):
@@ -125,7 +125,6 @@ async def test_member_budget_exhaustion_names_the_free_plan(gateway_factory):
         refused = await client.post("/api/solve", json={})
         assert refused.status_code == 429
         assert "Free plan allows" in refused.json()["detail"]
-        assert "on the 1st" in refused.json()["detail"]
 
 
 # --- account page and sign-out --------------------------------------------------
