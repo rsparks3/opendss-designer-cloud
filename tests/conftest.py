@@ -146,12 +146,12 @@ def gateway_factory(tmp_path: Path, fake_worker: FastAPI, fake_provider: FakePro
         if plans is not None:
             plans_path = tmp_path / f"plans-{len(apps)}.json"
             plans_path.write_text(json.dumps(plans), encoding="utf-8")
-        cfg = Config(workers=("http://worker-1", "http://worker-2"),
-                     db_path=tmp_path / f"ledger-{len(apps)}.sqlite",
-                     plans_path=plans_path, queue_wait_s=5.0, drain_s=1.0,
-                     secret="test-secret", public_url="http://gateway",
-                     support_email="help@example.com", operator_name="Test Operator",
-                     **overrides)
+        defaults = dict(workers=("http://worker-1", "http://worker-2"),
+                        db_path=tmp_path / f"ledger-{len(apps)}.sqlite",
+                        plans_path=plans_path, queue_wait_s=5.0, drain_s=1.0,
+                        secret="test-secret", public_url="http://gateway",
+                        support_email="help@example.com", operator_name="Test Operator")
+        cfg = Config(**{**defaults, **overrides})
         app = create_app(cfg, transport=httpx.ASGITransport(app=fake_worker),
                          oauth_transport=httpx.ASGITransport(app=fake_provider.app),
                          providers=fake_provider.providers())
