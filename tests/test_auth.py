@@ -67,14 +67,14 @@ async def test_magic_link_signs_in_and_switches_plan(gateway):
 
     health = (await client.get("/api/health")).json()
     assert health["plan"]["name"] == "Free"
-    assert health["limits"]["maxNodes"] == 1200, "the worker was handed the Free plan's limits"
+    assert health["limits"]["maxNodes"] == 50, "the worker was handed the Free plan's limits"
     assert {"label": "Account", "url": "/account"} in health["plan"]["links"]
     assert health["received"]["cookie"] is None, "session cookies never reach a worker"
 
     me = (await client.get("/api/me")).json()
     assert me == {"signedIn": True, "email": "ryan@example.com", "name": None,
                   "plan": {"id": "free", "name": "Free"},
-                  "usage": {"engineSeconds": 0.0, "budgetSeconds": 300,
+                  "usage": {"engineSeconds": 0.0, "budgetSeconds": 30,
                             "period": me["usage"]["period"], "resets": "today"}}
 
 

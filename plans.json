@@ -5,13 +5,13 @@
     "pool": "guest",
     "concurrency": 1,
     "limits": {
-      "maxNodes": 500,
-      "maxEdges": 1000,
+      "maxNodes": 10,
+      "maxEdges": 20,
       "maxTimeseriesCost": 250000,
       "engineResultTimeoutS": 30,
       "timeseriesTimeoutS": 30
     },
-    "budget_seconds": 30,
+    "budget_seconds": 10,
     "budget_period": "day",
     "message": "No account needed. {used} of {budget} of solver time used {period}.",
     "links": [
@@ -27,13 +27,13 @@
     "pool": "member",
     "concurrency": 1,
     "limits": {
-      "maxNodes": 1200,
-      "maxEdges": 2400,
+      "maxNodes": 50,
+      "maxEdges": 100,
       "maxTimeseriesCost": 1000000,
       "engineResultTimeoutS": 90,
       "timeseriesTimeoutS": 90
     },
-    "budget_seconds": 300,
+    "budget_seconds": 30,
     "budget_period": "day",
     "message": "{used} of {budget} of solver time used {period}.",
     "links": [

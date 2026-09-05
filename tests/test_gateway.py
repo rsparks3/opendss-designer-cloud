@@ -22,9 +22,9 @@ async def test_passthrough_adds_limits_header_and_strips_the_clients_copy(gatewa
     assert res.status_code == 200
     body = res.json()
     sent = json.loads(body["received"]["limits"])
-    assert sent["maxNodes"] == 500, "the gateway's plan, not the caller's header"
+    assert sent["maxNodes"] == 10, "the gateway's plan, not the caller's header"
     assert body["plan"]["name"] == "Guest"
-    assert "0 s of 30 s of solver time used today" in body["plan"]["message"]
+    assert "0 s of 10 s of solver time used today" in body["plan"]["message"]
     assert body["received"]["requestId"].startswith("gw-")
 
 

@@ -68,22 +68,22 @@ def _minutes(seconds: float) -> str:
 #: Seed plans; ``plans.json`` in the repository root is the same data and
 #: what a deployment actually loads. Guest limits are deliberately tight and
 #: the free plan is what the sign-in prompt promises. A solve takes a fraction
-#: of a second and a yearly run a few seconds, so thirty seconds of guest time
-#: is dozens of power flows and a short leash for a loop in a tab.
+#: of a second and a yearly run a few seconds, so ten seconds of guest time
+#: is hundreds of power flows and a short leash for a loop in a tab.
 DEFAULT_PLANS: dict[str, Plan] = {
     "guest": Plan(
         id="guest", name="Guest", priority=10,
-        limits={"maxNodes": 500, "maxEdges": 1000, "maxTimeseriesCost": 250_000,
+        limits={"maxNodes": 10, "maxEdges": 20, "maxTimeseriesCost": 250_000,
                 "engineResultTimeoutS": 30, "timeseriesTimeoutS": 30},
-        budget_seconds=30, budget_period="day", concurrency=1, pool="guest",
+        budget_seconds=10, budget_period="day", concurrency=1, pool="guest",
         message="No account needed. {used} of {budget} of solver time used {period}.",
         links=[{"label": "Sign in", "url": "/auth/signin"}],
     ),
     "free": Plan(
         id="free", name="Free", priority=5,
-        limits={"maxNodes": 1200, "maxEdges": 2400, "maxTimeseriesCost": 1_000_000,
+        limits={"maxNodes": 50, "maxEdges": 100, "maxTimeseriesCost": 1_000_000,
                 "engineResultTimeoutS": 90, "timeseriesTimeoutS": 90},
-        budget_seconds=5 * 60, budget_period="day", concurrency=1, pool="member",
+        budget_seconds=30, budget_period="day", concurrency=1, pool="member",
         message="{used} of {budget} of solver time used {period}.",
         links=[{"label": "Account", "url": "/account"}],
     ),
