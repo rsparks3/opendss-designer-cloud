@@ -1,9 +1,10 @@
-"""A fake worker that behaves like opendss-designer's API surface, and a
-gateway wired to it through an in-process transport.
+"""A fake worker that behaves like opendss-designer's API surface, a fake
+OAuth provider standing in for GitHub and Google, and a gateway wired to both
+through in-process transports.
 
-The fake reports which worker it is (from the URL host the gateway used),
-echoes the headers it received, and sleeps on request so scheduling can be
-observed without a real engine.
+The fake worker reports which worker it is (from the URL host the gateway
+used), echoes the headers it received, and sleeps on request so scheduling can
+be observed without a real engine.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from opendss_gateway import auth
 from opendss_gateway.app import create_app
 from opendss_gateway.config import Config
 
@@ -31,14 +33,17 @@ def make_fake_worker() -> FastAPI:
     def seen(request: Request) -> dict:
         return {"worker": request.url.hostname,
                 "limits": request.headers.get("x-opendss-limits"),
-                "requestId": request.headers.get("x-request-id")}
+                "requestId": request.headers.get("x-request-id"),
+                "cookie": request.headers.get("cookie")}
 
     @fake.get("/api/health")
     async def health(request: Request):
         limits = request.headers.get("x-opendss-limits")
         out = {"version": "fake", "mode": "demo", "received": seen(request)}
         if limits:
-            out["plan"] = json.loads(limits).get("plan")
+            parsed = json.loads(limits)
+            out["plan"] = parsed.get("plan")
+            out["limits"] = {k: v for k, v in parsed.items() if k != "plan"}
         return out
 
     @fake.get("/api/samples")
@@ -77,18 +82,66 @@ def make_fake_worker() -> FastAPI:
     return fake
 
 
+class FakeProvider:
+    """GitHub and Google token/userinfo endpoints on one ASGI app, with knobs."""
+
+    def __init__(self):
+        self.google_verified = True
+        self.github_emails = [{"email": "octo@example.com", "primary": True, "verified": True}]
+        self.codes_seen: list[str] = []
+        self.app = FastAPI()
+        app = self.app
+
+        @app.post("/login/oauth/access_token")
+        async def gh_token(request: Request):
+            form = await request.form()
+            self.codes_seen.append(str(form.get("code")))
+            return {"access_token": "gh-token", "token_type": "bearer"}
+
+        @app.get("/user")
+        async def gh_user():
+            return {"id": 42, "login": "octo", "name": "Octo Cat"}
+
+        @app.get("/user/emails")
+        async def gh_emails():
+            return self.github_emails
+
+        @app.post("/token")
+        async def g_token(request: Request):
+            form = await request.form()
+            self.codes_seen.append(str(form.get("code")))
+            return {"access_token": "g-token", "token_type": "Bearer"}
+
+        @app.get("/v1/userinfo")
+        async def g_userinfo():
+            return {"sub": "g-1", "email": "Gina@Example.com", "name": "Gina",
+                    "email_verified": self.google_verified}
+
+    def providers(self) -> list[auth.Provider]:
+        return [auth.github_provider("gh-id", "gh-secret", base="http://fake-github",
+                                     api="http://fake-github"),
+                auth.google_provider("g-id", "g-secret", accounts="http://fake-google",
+                                     token="http://fake-google", openid="http://fake-google")]
+
+
 @pytest.fixture
 def fake_worker() -> FastAPI:
     return make_fake_worker()
 
 
 @pytest.fixture
-def gateway_factory(tmp_path: Path, fake_worker: FastAPI):
-    """Build a gateway app against the fake worker with overridden config."""
+def fake_provider() -> FakeProvider:
+    return FakeProvider()
+
+
+@pytest.fixture
+def gateway_factory(tmp_path: Path, fake_worker: FastAPI, fake_provider: FakeProvider):
+    """Build a gateway app against the fakes with overridden config."""
     apps = []
 
     def build(**overrides) -> FastAPI:
         plans = overrides.pop("plans", None)
+        overrides.pop("providers", None)
         plans_path = None
         if plans is not None:
             plans_path = tmp_path / f"plans-{len(apps)}.json"
@@ -96,8 +149,12 @@ def gateway_factory(tmp_path: Path, fake_worker: FastAPI):
         cfg = Config(workers=("http://worker-1", "http://worker-2"),
                      db_path=tmp_path / f"ledger-{len(apps)}.sqlite",
                      plans_path=plans_path, queue_wait_s=5.0, drain_s=1.0,
+                     secret="test-secret", public_url="http://gateway",
+                     support_email="help@example.com", operator_name="Test Operator",
                      **overrides)
-        app = create_app(cfg, transport=httpx.ASGITransport(app=fake_worker))
+        app = create_app(cfg, transport=httpx.ASGITransport(app=fake_worker),
+                         oauth_transport=httpx.ASGITransport(app=fake_provider.app),
+                         providers=fake_provider.providers())
         apps.append(app)
         return app
 
@@ -108,15 +165,18 @@ def gateway_factory(tmp_path: Path, fake_worker: FastAPI):
 async def gateway(gateway_factory):
     """A default gateway plus an httpx client speaking to it in-process."""
     app = gateway_factory()
-    async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
-                                     base_url="http://gateway") as client:
-            yield app, client
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://gateway") as client:
+        yield app, client
 
 
 def guest_plan(**overrides) -> dict:
-    spec = {"name": "Guest", "priority": 10, "pool": "guest", "concurrency": 1,
-            "limits": {"maxNodes": 50}, "budget_seconds": 1800, "budget_period": "day",
-            "message": "{used} of {budget} used {period}.", "links": []}
-    spec.update(overrides)
-    return {"guest": spec}
+    guest = {"name": "Guest", "priority": 10, "pool": "guest", "concurrency": 1,
+             "limits": {"maxNodes": 50}, "budget_seconds": 300, "budget_period": "day",
+             "message": "{used} of {budget} used {period}.", "links": []}
+    guest.update(overrides)
+    free = {"name": "Free", "priority": 5, "pool": "member", "concurrency": 1,
+            "limits": {"maxNodes": 500}, "budget_seconds": 1200, "budget_period": "month",
+            "message": "{used} of {budget} used {period}.",
+            "links": [{"label": "Account", "url": "/account"}]}
+    return {"guest": guest, "free": free}

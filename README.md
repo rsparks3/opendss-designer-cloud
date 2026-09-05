@@ -17,9 +17,10 @@ The half of the contract the *worker* implements (the trusted limits header,
 `X-Engine-Seconds`, request ids) is documented in the app's
 [deployment guide](https://opendssdesigner-docs.ryanmsparks.com/deployment/).
 
-**Status: v0.1, guests only.** Every caller is a guest keyed by client
-address, with a daily engine-time budget. Accounts, sign-in and paid plans are
-the next stages and land here.
+**Status: v0.2, guests and free accounts.** A guest is keyed by client
+address with a daily engine-time budget. Signing in (email magic link, GitHub
+or Google; no passwords) moves a caller to the Free plan with a monthly
+budget. Paid plans are the next stage.
 
 ## What it does per request
 
@@ -29,6 +30,8 @@ the next stages and land here.
 | `/api/timeseries` | yes | same, but the SSE response starts immediately (`: queued` comments while waiting, so a CDN never sees a silent origin) and the engine time is read off the stream's final event |
 | everything else under `/api` | no | round-robin to a worker, limits header attached so `/api/health` describes the caller's plan |
 | `/gw/health` | – | the gateway's own liveness: workers, in-flight, queued, draining |
+| `/api/me` | – | who the caller is and their usage, as JSON |
+| `/auth/*`, `/account`, `/legal/*` | – | sign-in, the account page, privacy and terms, served by the gateway itself |
 
 The client's own copy of the limits header is always dropped. Circuits are
 never stored: bodies are forwarded and forgotten. The ledger holds a client
@@ -54,6 +57,21 @@ exits. A deploy costs at most the runs that were longer than that.
 engine-seconds per day or month, concurrency, priority, pool, and the banner
 message. Edit a copy and point `GATEWAY_PLANS` at it; no release needed.
 
+## Accounts
+
+No passwords. A person proves an email address with a signed single-use
+magic link (15 minutes), or through GitHub (primary verified email) or Google
+(`email_verified` only). The same address through any method is one account.
+The session is a signed `HttpOnly` cookie for 30 days, refreshed daily;
+"sign out everywhere" bumps a per-user epoch that invalidates every cookie.
+Providers are enabled by the presence of their credentials; email sign-in is
+enabled by a working `GATEWAY_EMAIL_MODE` (`log` does not count on an https
+URL). With no method enabled the banner drops its "Sign in" link and the
+sign-in page says so.
+
+What is stored: email, optional display name, sign-in identities (provider +
+stable id), plan, and the usage ledger keyed to the user. Never circuits.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -70,6 +88,15 @@ message. Edit a copy and point `GATEWAY_PLANS` at it; no release needed.
 | `GATEWAY_DRAIN_S` | `200` | shutdown grace for in-flight runs |
 | `GATEWAY_HOST` / `PORT` | `127.0.0.1` / `8730` | bind |
 | `GATEWAY_LOG_JSON` | off | one JSON object per log line |
+| `GATEWAY_SECRET` | random per process | signs sessions, magic links, OAuth state; rotate to sign everyone out |
+| `GATEWAY_PUBLIC_URL` | `http://127.0.0.1:8730` | browser-facing origin, for email links and OAuth redirects |
+| `GATEWAY_COOKIE_SECURE` | on for https | force the `Secure` cookie flag |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | unset | enables "Continue with GitHub" |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | unset | enables "Continue with Google" |
+| `GATEWAY_EMAIL_MODE` | `log` | `log`, `resend` or `smtp` |
+| `EMAIL_FROM`, `RESEND_API_KEY`, `SMTP_URL` | unset | per mode |
+| `GATEWAY_MAGIC_PER_IP_HOUR` / `_PER_EMAIL_HOUR` | 6 / 3 | sign-in link rate limits |
+| `GATEWAY_OPERATOR_NAME`, `GATEWAY_SUPPORT_EMAIL` | unset | shown on the legal and account pages |
 
 Workers need `OPENDSS_DESIGNER_TRUSTED_LIMITS_HEADER=X-OpenDSS-Limits` and must
 not be reachable by anything but the gateway (and, for the static frontend,

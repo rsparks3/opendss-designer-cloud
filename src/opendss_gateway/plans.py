@@ -65,18 +65,28 @@ def _minutes(seconds: float) -> str:
     return f"{minutes / 60:.1f} h"
 
 
-#: What the public instance allows a visitor with no account. Size limits
-#: are as generous as the pre-gateway demo was (nothing else exists yet); the
-#: budget is small because a solve takes a fraction of a second and a yearly
-#: run a few seconds, so five minutes is a full afternoon of honest use and
-#: a short leash for a loop in a tab.
+#: Seed plans; ``plans.json`` in the repository root is the same data and
+#: what a deployment actually loads. Guest limits are deliberately tight and
+#: the free plan is what the sign-in prompt promises. A solve takes a fraction
+#: of a second and a yearly run a few seconds, so five minutes of guest time
+#: is an afternoon of honest use and a short leash for a loop in a tab.
 DEFAULT_PLANS: dict[str, Plan] = {
     "guest": Plan(
         id="guest", name="Guest", priority=10,
-        limits={"maxNodes": 2000, "maxEdges": 2400, "maxTimeseriesCost": 2_000_000,
-                "engineResultTimeoutS": 90, "timeseriesTimeoutS": 180},
+        limits={"maxNodes": 500, "maxEdges": 1000, "maxTimeseriesCost": 250_000,
+                "engineResultTimeoutS": 30, "timeseriesTimeoutS": 30},
         budget_seconds=5 * 60, budget_period="day", concurrency=1, pool="guest",
-        message="No account needed. {used} of {budget} of solver time used {period}.",
+        message="No account needed. {used} of {budget} of solver time used {period}. "
+                "Sign in (free) for bigger circuits and longer runs.",
+        links=[{"label": "Sign in", "url": "/auth/signin"}],
+    ),
+    "free": Plan(
+        id="free", name="Free", priority=5,
+        limits={"maxNodes": 1200, "maxEdges": 2400, "maxTimeseriesCost": 1_000_000,
+                "engineResultTimeoutS": 90, "timeseriesTimeoutS": 90},
+        budget_seconds=20 * 60, budget_period="month", concurrency=1, pool="member",
+        message="{used} of {budget} of solver time used {period}.",
+        links=[{"label": "Account", "url": "/account"}],
     ),
 }
 
@@ -88,6 +98,7 @@ def load_plans(path: Path | None) -> dict[str, Plan]:
     plans: dict[str, Plan] = {}
     for pid, spec in raw.items():
         plans[pid] = Plan(id=pid, **spec)
-    if "guest" not in plans:
-        raise ValueError("plans file must define a 'guest' plan")
+    for required in ("guest", "free"):
+        if required not in plans:
+            raise ValueError(f"plans file must define a '{required}' plan")
     return plans

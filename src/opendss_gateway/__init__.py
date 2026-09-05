@@ -6,4 +6,4 @@ one dispatch slot per worker, tightens the worker's limits per request through
 the trusted limits header, and meters the engine-seconds each call used.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

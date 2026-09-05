@@ -61,7 +61,8 @@ async def test_blocked_waiter_does_not_block_the_line_behind_it():
     await asyncio.sleep(0)
     lease = await asyncio.wait_for(m, 1)
     assert not g2.done()
-    lease.release(); g1.release()
+    lease.release()
+    g1.release()
     (await asyncio.wait_for(g2, 1)).release()
 
 
@@ -106,5 +107,6 @@ async def test_drain_fails_waiters_and_refuses_new_work():
 async def test_double_release_is_harmless():
     s = Scheduler(["w1"])
     lease = await s.acquire(job("a"))
-    lease.release(); lease.release()
+    lease.release()
+    lease.release()
     assert s.inflight == 0 and len(s._free) == 1
