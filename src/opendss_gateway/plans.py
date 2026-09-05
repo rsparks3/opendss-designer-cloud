@@ -65,15 +65,17 @@ def _minutes(seconds: float) -> str:
     return f"{minutes / 60:.1f} h"
 
 
-#: What the public instance allows a visitor with no account. Deliberately
-#: as generous as the pre-gateway demo was (nothing else exists yet); the
-#: budget only stops a loop in a tab from monopolising the box.
+#: What the public instance allows a visitor with no account. Size limits
+#: are as generous as the pre-gateway demo was (nothing else exists yet); the
+#: budget is small because a solve takes a fraction of a second and a yearly
+#: run a few seconds, so five minutes is a full afternoon of honest use and
+#: a short leash for a loop in a tab.
 DEFAULT_PLANS: dict[str, Plan] = {
     "guest": Plan(
         id="guest", name="Guest", priority=10,
         limits={"maxNodes": 2000, "maxEdges": 2400, "maxTimeseriesCost": 2_000_000,
                 "engineResultTimeoutS": 90, "timeseriesTimeoutS": 180},
-        budget_seconds=30 * 60, budget_period="day", concurrency=1, pool="guest",
+        budget_seconds=5 * 60, budget_period="day", concurrency=1, pool="guest",
         message="No account needed. {used} of {budget} of solver time used {period}.",
     ),
 }
