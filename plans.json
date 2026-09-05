@@ -1,0 +1,19 @@
+{
+  "guest": {
+    "name": "Guest",
+    "priority": 10,
+    "pool": "guest",
+    "concurrency": 1,
+    "limits": {
+      "maxNodes": 2000,
+      "maxEdges": 2400,
+      "maxTimeseriesCost": 2000000,
+      "engineResultTimeoutS": 90,
+      "timeseriesTimeoutS": 180
+    },
+    "budget_seconds": 1800,
+    "budget_period": "day",
+    "message": "No account needed. {used} of {budget} of solver time used {period}.",
+    "links": []
+  }
+}

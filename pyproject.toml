@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opendss-designer-gateway"
+version = "0.1.0"
+description = "Gateway for a hosted OpenDSS Designer: solver queue, plans, engine-time metering."
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.12"
+authors = [{ name = "Ryan Sparks", email = "ryan@ryanmsparks.com" }]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "anyio>=4", "ruff"]
+
+[project.urls]
+Homepage = "https://opendssdesigner.ryanmsparks.com"
+Repository = "https://github.com/rsparks3/opendss-designer-cloud"
+"Designer app" = "https://github.com/rsparks3/opendss-designer"
+
+[project.scripts]
+opendss-gateway = "opendss_gateway.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
