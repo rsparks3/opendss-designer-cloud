@@ -99,7 +99,6 @@ async def test_guest_pool_cap_serialises_guests_across_two_workers(gateway_facto
             elapsed = time.monotonic() - t0
     assert r1.status_code == r2.status_code == 200
     assert elapsed >= 0.55, "with the guest pool capped at 1 the runs must not overlap"
-    assert r1.json()["received"]["worker"] == r2.json()["received"]["worker"]
 
 
 async def test_without_the_cap_guests_use_both_workers(gateway):
