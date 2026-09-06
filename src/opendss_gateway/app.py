@@ -431,7 +431,7 @@ def create_app(cfg: Config, transport: httpx.AsyncBaseTransport | None = None,
                 success_url=f"{cfg.public_url}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
                 cancel_url=f"{cfg.public_url}/account")
         except billing.StripeError as exc:
-            return _page(pages.billing_message("Billing", str(exc), error=True), 502)
+            return _page(pages.billing_message("Billing", str(exc), error=True), 503)
         return RedirectResponse(url, status_code=303)
 
     @app.get("/billing/success")
@@ -476,7 +476,7 @@ def create_app(cfg: Config, transport: httpx.AsyncBaseTransport | None = None,
         try:
             url = await gw.stripe.create_portal(sub.customer_id, f"{cfg.public_url}/account")
         except billing.StripeError as exc:
-            return _page(pages.billing_message("Billing", str(exc), error=True), 502)
+            return _page(pages.billing_message("Billing", str(exc), error=True), 503)
         return RedirectResponse(url, status_code=303)
 
     @app.post("/billing/webhook")

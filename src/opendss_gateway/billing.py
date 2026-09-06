@@ -58,7 +58,8 @@ class Stripe:
             raise StripeError("Could not reach the payment provider. Try again in a moment.") from exc
         if res.status_code >= 400:
             logger.error("stripe %s -> %s: %s", path, res.status_code, res.text[:300])
-            raise StripeError("The payment provider refused the request. Try again in a moment.")
+            raise StripeError("The payment provider refused the request. This has been logged; "
+                              "try again later or email support.")
         return res.json()
 
     async def _get(self, path: str) -> dict:
