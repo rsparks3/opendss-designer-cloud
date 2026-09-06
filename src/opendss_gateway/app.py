@@ -59,8 +59,11 @@ _PRIVATE = frozenset({"cookie", "authorization"})
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _ENGINE_SECONDS = re.compile(rb'"engineSeconds":\s*([0-9.]+)')
 _PAGE_HEADERS = {
+    # form-action also governs where a form's POST may be *redirected* to
+    # (Chrome enforces it on the 303), so Stripe's hosted pages are listed.
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
-                               "form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+                               "form-action 'self' https://checkout.stripe.com "
+                               "https://billing.stripe.com; base-uri 'none'; frame-ancestors 'none'",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "Cache-Control": "no-store",

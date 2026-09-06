@@ -84,6 +84,10 @@ async def test_checkout_webhook_portal_loop(gateway_factory, fake_stripe):
         await sign_in_by_email(app, client, "payer@example.com")
         page = await client.get("/account")
         assert "Upgrade to Pro" in page.text and "$5 / month" in page.text
+        # Chrome applies form-action to the redirect after a POST, so the
+        # account page must allow Stripe's hosted pages or Upgrade goes nowhere.
+        assert "https://checkout.stripe.com" in page.headers["content-security-policy"]
+        assert "https://billing.stripe.com" in page.headers["content-security-policy"]
         csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
 
         # Checkout: a redirect to Stripe, with our reference on it.
