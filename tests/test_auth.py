@@ -13,11 +13,23 @@ def link_from(mail: dict) -> str:
     return re.search(r"(http://\S+/auth/magic/verify\?t=\S+)", mail["text"]).group(1)
 
 
+def token_from(link: str) -> str:
+    return link.split("t=", 1)[1]
+
+
+async def follow_magic_link(client, link: str) -> httpx.Response:
+    """What a person does: open the link (a page with one button), press it."""
+    page = await client.get(link)
+    assert page.status_code == 200, page.text
+    assert 'action="/auth/magic/verify"' in page.text
+    return await client.post("/auth/magic/verify", data={"t": token_from(link)})
+
+
 async def sign_in_by_email(app, client, email: str) -> None:
     res = await client.post("/auth/magic", data={"email": email})
     assert res.status_code == 200
     link = link_from(app.state.gateway.mailer.sent[-1])
-    res = await client.get(link)
+    res = await follow_magic_link(client, link)
     assert res.status_code == 303, res.text
     assert auth.SESSION_COOKIE in res.cookies
 
@@ -61,7 +73,7 @@ async def test_magic_link_signs_in_and_switches_plan(gateway):
     assert mail["to"] == "ryan@example.com"
     link = link_from(mail)
 
-    res = await client.get(link)
+    res = await follow_magic_link(client, link)
     assert res.status_code == 303 and res.headers["location"] == "http://gateway/"
     assert auth.SESSION_COOKIE in res.cookies
 
@@ -82,8 +94,13 @@ async def test_magic_link_is_single_use_and_bound_to_the_email(gateway):
     app, client = gateway
     await client.post("/auth/magic", data={"email": "one@example.com"})
     link = link_from(app.state.gateway.mailer.sent[-1])
-    assert (await client.get(link)).status_code == 303
-    again = await client.get(link)
+    # Opening the link (as a mail scanner would) consumes nothing: five GETs
+    # and the token is still good.
+    for _ in range(5):
+        assert (await client.get(link)).status_code == 200
+    assert auth.SESSION_COOKIE not in client.cookies
+    assert (await follow_magic_link(client, link)).status_code == 303
+    again = await client.post("/auth/magic/verify", data={"t": token_from(link)})
     assert again.status_code == 400 and "already been used" in again.text
     tampered = await client.get(link[:-3] + "xyz")
     assert tampered.status_code == 400 and "not valid" in tampered.text

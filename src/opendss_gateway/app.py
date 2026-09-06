@@ -329,7 +329,18 @@ def create_app(cfg: Config, transport: httpx.AsyncBaseTransport | None = None,
         return _page(pages.check_email(address))
 
     @app.get("/auth/magic/verify")
-    async def magic_verify(t: str = "") -> Response:
+    async def magic_confirm(t: str = "") -> Response:
+        # Validate the signature so an expired link says so now, but do not
+        # consume the nonce: email scanners follow GETs, and the sign-in must
+        # only happen on the POST below.
+        try:
+            auth.read_magic(gw.signer, t)
+        except auth.AuthError as exc:
+            return _page(pages.message("Sign-in link", str(exc), error=True), 400)
+        return _page(pages.magic_confirm(t))
+
+    @app.post("/auth/magic/verify")
+    async def magic_verify(t: str = Form("")) -> Response:
         try:
             address, nonce = auth.read_magic(gw.signer, t)
         except auth.AuthError as exc:
@@ -486,7 +497,10 @@ def create_app(cfg: Config, transport: httpx.AsyncBaseTransport | None = None,
     async def billing_webhook(request: Request) -> Response:
         if not gw.stripe.enabled:
             return JSONResponse({"detail": "billing off"}, status_code=404)
-        payload = await request.body()
+        try:
+            payload = await _read_body(request)
+        except _BodyTooLarge:
+            return _too_large()
         try:
             billing.verify_signature(payload, request.headers.get("stripe-signature"),
                                      cfg.stripe_webhook_secret)
@@ -539,14 +553,46 @@ def _busy(detail: str, retry: int = 10) -> JSONResponse:
     return JSONResponse({"detail": detail}, status_code=503, headers={"Retry-After": str(retry)})
 
 
+#: The gateway buffers a request body before forwarding it. Workers cap
+#: bodies at 8 MB with a readable message; this is the backstop above that
+#: so a client cannot make the gateway itself hold an arbitrary amount.
+MAX_BODY_BYTES = 12 * 1024 * 1024
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+async def _read_body(request: Request) -> bytes:
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        raise _BodyTooLarge
+    chunks: list[bytes] = []
+    seen = 0
+    async for chunk in request.stream():
+        seen += len(chunk)
+        if seen > MAX_BODY_BYTES:
+            raise _BodyTooLarge
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _too_large() -> JSONResponse:
+    return JSONResponse({"detail": "Request too large (limit 12 MB)."}, status_code=413)
+
+
 async def _passthrough(gw: Gateway, request: Request, path: str, caller: Caller,
                        request_id: str) -> Response:
     _, used = gw.usage(caller)
+    try:
+        body = await _read_body(request)
+    except _BodyTooLarge:
+        return _too_large()
     worker = gw.next_worker()
     upstream = await gw.client.request(
         request.method, worker + path, params=request.query_params,
         headers=gw.upstream_headers(request, caller.plan, used, request_id),
-        content=await request.body())
+        content=body)
     return Response(content=upstream.content, status_code=upstream.status_code,
                     headers=gw.downstream_headers(upstream))
 
@@ -558,7 +604,10 @@ async def _engine_call(gw: Gateway, request: Request, path: str, caller: Caller,
     if plan.budget_seconds is not None and used >= plan.budget_seconds:
         return JSONResponse({"detail": plan.exhausted_message()}, status_code=429,
                             headers={"X-Request-ID": request_id})
-    body = await request.body()
+    try:
+        body = await _read_body(request)
+    except _BodyTooLarge:
+        return _too_large()
     job = Job(client=caller.client, plan_id=plan.id, priority=plan.priority,
               pool=plan.pool, concurrency=plan.concurrency)
     try:
@@ -596,7 +645,10 @@ async def _stream_call(gw: Gateway, request: Request, path: str, caller: Caller,
     if plan.budget_seconds is not None and used >= plan.budget_seconds:
         return JSONResponse({"detail": plan.exhausted_message()}, status_code=429,
                             headers={"X-Request-ID": request_id})
-    body = await request.body()
+    try:
+        body = await _read_body(request)
+    except _BodyTooLarge:
+        return _too_large()
     headers = gw.upstream_headers(request, plan, used, request_id)
     job = Job(client=caller.client, plan_id=plan.id, priority=plan.priority,
               pool=plan.pool, concurrency=plan.concurrency)

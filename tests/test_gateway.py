@@ -153,6 +153,26 @@ async def test_stream_relays_a_refusal_as_an_error_event(gateway):
     assert run["status"] == "http-413" and run["engine_seconds"] == 0
 
 
+async def test_oversized_bodies_are_refused_before_forwarding(gateway):
+    _, client = gateway
+    from opendss_gateway.app import MAX_BODY_BYTES
+    too_big = b"x" * (MAX_BODY_BYTES + 1)
+    res = await client.post("/api/solve", content=too_big,
+                            headers={"Content-Type": "application/json"})
+    assert res.status_code == 413
+    # A lying Content-Length does not help: the stream is counted.
+    res = await client.post("/api/validate", content=too_big,
+                            headers={"Content-Type": "application/json", "Content-Length": "10"})
+    assert res.status_code in (413, 400)
+
+
+async def test_pages_link_back_to_the_designer(gateway):
+    _, client = gateway
+    for path in ("/auth/signin", "/legal/privacy"):
+        text = (await client.get(path)).text
+        assert "Back to the designer" in text and 'class="brand" href="/"' in text
+
+
 async def test_gateway_health_reports_queue_state(gateway):
     _, client = gateway
     body = (await client.get("/gw/health")).json()

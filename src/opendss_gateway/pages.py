@@ -30,13 +30,18 @@ table{width:100%;border-collapse:collapse;margin:.5rem 0}td,th{text-align:left;p
 .meter{height:8px;background:var(--bg);border:1px solid var(--line);border-radius:4px;overflow:hidden}.meter>i{display:block;height:100%;background:var(--accent)}
 footer{color:var(--muted);font-size:.85em;margin:1.5rem 0;text-align:center}footer a{color:inherit}
 a{color:var(--accent)}
+nav.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem}
+nav.top .brand{font-weight:700;color:var(--ink);text-decoration:none}
+nav.top .btn{padding:.4rem .8rem}
 """
 
 
 def layout(title: str, body: str, *, app_url: str = "/") -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{h(title)} · OpenDSS Designer</title>
-<style>{_STYLE}</style></head><body><main>{body}
+<style>{_STYLE}</style></head><body><main>
+<nav class="top"><a class="brand" href="{h(app_url)}">OpenDSS Designer</a><a class="btn" href="{h(app_url)}">&larr; Back to the designer</a></nav>
+{body}
 <footer><a href="{h(app_url)}">Back to the designer</a> · <a href="/legal/privacy">Privacy</a> · <a href="/legal/terms">Terms</a> ·
 <a href="https://github.com/rsparks3/opendss-designer">Source</a></footer></main></body></html>"""
 
@@ -64,6 +69,19 @@ and a monthly solver budget instead of a daily one. Nothing you draw is stored o
 {err}{email_form}{divider}<div class="row">{buttons}</div>
 <p><small>By signing in you agree to the <a href="/legal/terms">terms</a> and <a href="/legal/privacy">privacy policy</a>.</small></p>
 </div>""")
+
+
+def magic_confirm(token: str) -> str:
+    """The link from the email lands here; the actual sign-in is the POST.
+    Mail scanners and link previewers follow GETs, and a link that signed you
+    in on GET would be consumed (and the session created) by the scanner."""
+    return layout("Sign in", f"""
+<div class="card"><h1>Finish signing in</h1>
+<p class="muted">Click once to sign in to OpenDSS Designer in this browser.</p>
+<form method="post" action="/auth/magic/verify"><input type="hidden" name="t" value="{h(token)}">
+<div class="row"><button class="primary" type="submit">Sign in</button></div></form>
+<p><small>The link works once and expires 15 minutes after it was sent. If it has expired,
+<a href="/auth/signin">request a new one</a>.</small></p></div>""")
 
 
 def check_email(email: str) -> str:
