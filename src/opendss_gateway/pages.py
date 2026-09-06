@@ -252,8 +252,8 @@ check them before relying on them for any engineering decision. The operator is 
 from the use of the service or its unavailability, to the fullest extent the law allows.</p>
 
 <h2>Paid plan and billing</h2>
-<p>The Pro plan is a monthly subscription billed by Stripe at the price shown at checkout, in advance, renewing
-automatically until cancelled. You can cancel at any time from your account page; access continues to the end
+<p>The Pro plan is a subscription billed by Stripe at the price and interval shown at checkout, in advance,
+renewing automatically until cancelled. You can cancel at any time from your account page; access continues to the end
 of the period already paid for and no further charges are made. Payments already made are not refunded for
 partial periods, except where the law requires or where the service was unavailable for a substantial part of a
 period, in which case email {contact}. If a renewal payment fails, Pro continues for a short grace period while
