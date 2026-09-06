@@ -153,6 +153,12 @@ def _period_end(sub: dict) -> float | None:
     return float(end) if end is not None else None
 
 
+def _cancel_scheduled(sub: dict) -> bool:
+    """Newer API versions express "cancel at period end" as a `cancel_at`
+    timestamp with `cancel_at_period_end` left false; accept either."""
+    return bool(sub.get("cancel_at_period_end")) or sub.get("cancel_at") is not None
+
+
 def plan_for(status: str | None) -> str:
     return "pro" if status in PRO_STATUSES else "free"
 
@@ -161,10 +167,15 @@ def apply_subscription(subs: Subscriptions, users: Users, *, user_id: int, custo
                        sub: dict | None) -> str:
     """Record the subscription and set the user's plan from it. Returns the plan."""
     status = (sub or {}).get("status") or "none"
+    sub = sub or {}
+    end = _period_end(sub)
+    if sub.get("cancel_at") is not None:
+        # Access ends at the scheduled cancellation, which may precede the
+        # period end; show that date rather than a renewal that will not come.
+        end = float(sub["cancel_at"])
     subs.upsert(user_id=user_id, customer_id=customer_id,
-                subscription_id=(sub or {}).get("id"), status=status,
-                current_period_end=_period_end(sub or {}),
-                cancel_at_period_end=bool((sub or {}).get("cancel_at_period_end")))
+                subscription_id=sub.get("id"), status=status,
+                current_period_end=end, cancel_at_period_end=_cancel_scheduled(sub))
     plan = plan_for(status)
     users.set_plan(user_id, plan)
     logger.info("billing user=%s customer=%s status=%s -> %s", user_id, customer_id, status, plan)

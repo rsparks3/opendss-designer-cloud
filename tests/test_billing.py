@@ -135,6 +135,13 @@ async def test_checkout_webhook_portal_loop(gateway_factory, fake_stripe):
         page = await client.get("/account")
         assert "Access continues until" in page.text
 
+        # Newer Stripe API versions signal the same thing with `cancel_at`.
+        sub2 = {"id": "sub_1", "customer": "cus_1", "status": "active", "cancel_at_period_end": False,
+                "cancel_at": 4102444800, "current_period_end": 4102444800}
+        await post_webhook(client, event("customer.subscription.updated", sub2, "evt_2b"))
+        page = await client.get("/account")
+        assert "Access continues until" in page.text
+
         # Failed renewal keeps Pro in grace, with a warning.
         sub["status"] = "past_due"
         await post_webhook(client, event("customer.subscription.updated", sub, "evt_3"))
