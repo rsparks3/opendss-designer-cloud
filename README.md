@@ -87,6 +87,20 @@ is Free. The success page also confirms the session directly so the upgrade
 shows before the webhook arrives. Only a Stripe customer id, subscription id
 and status are stored.
 
+## Operator dashboard
+
+`/admin` exists for signed-in users whose email is in `GATEWAY_ADMIN_EMAILS`
+and is a 404 for everyone else. It lists every account with its sign-in
+methods, effective plan, Stripe subscription status, engine time this period
+and all-time, join and last-seen dates; today's guest addresses and their
+usage; headline counts for the last day and 30 days; and the last forty runs.
+Three levers per account, each a CSRF-checked form: **pin** a plan the user
+keeps regardless of billing (`users.plan_override`, which a subscription
+webhook cannot touch; unpin to let Stripe decide again), **disable** (treated
+as a guest and signed out everywhere), and **sign out everywhere**. Every
+action is logged with the operator's email. Server-rendered, no JavaScript,
+same CSP as the other pages.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -116,6 +130,7 @@ and status are stored.
 | `STRIPE_WEBHOOK_SECRET` | unset | the endpoint's signing secret (`whsec_…`) |
 | `STRIPE_AUTOMATIC_TAX` | off | ask Stripe Tax to add tax at checkout |
 | `GATEWAY_PRO_PRICE_TEXT` | `$5 / month` | shown next to the Upgrade button |
+| `GATEWAY_ADMIN_EMAILS` | unset | comma-separated emails that may open `/admin` |
 
 Workers need `OPENDSS_DESIGNER_TRUSTED_LIMITS_HEADER=X-OpenDSS-Limits` and must
 not be reachable by anything but the gateway (and, for the static frontend,

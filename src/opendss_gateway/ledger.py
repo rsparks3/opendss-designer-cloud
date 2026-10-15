@@ -56,3 +56,36 @@ class Ledger:
                     " worker, request_id FROM runs WHERE client=? ORDER BY id DESC LIMIT ?",
                     (client, limit))
             return [dict(row) for row in cur.fetchall()]
+
+    # -- operator views -------------------------------------------------------
+
+    def overview(self, now: float | None = None) -> dict:
+        """Headline numbers for the admin page: runs and engine time over the
+        last day and 30 days, and how many distinct guests were seen."""
+        now = now or time.time()
+        day, month = now - 86400, now - 30 * 86400
+        with self._s.lock:
+            db = self._s.db
+
+            def window(since: float) -> dict:
+                row = db.execute(
+                    "SELECT COUNT(*) AS runs, COALESCE(SUM(engine_seconds), 0) AS seconds,"
+                    " COUNT(DISTINCT CASE WHEN client LIKE 'ip:%' THEN client END) AS guests,"
+                    " COUNT(DISTINCT CASE WHEN client LIKE 'user:%' THEN client END) AS members,"
+                    " SUM(CASE WHEN status <> 'ok' THEN 1 ELSE 0 END) AS failed"
+                    " FROM runs WHERE ts >= ?", (since,)).fetchone()
+                return {"runs": int(row["runs"]), "seconds": float(row["seconds"]),
+                        "guests": int(row["guests"]), "members": int(row["members"]),
+                        "failed": int(row["failed"] or 0)}
+
+            return {"day": window(day), "month": window(month)}
+
+    def guests(self, period: str, limit: int = 50) -> list[dict]:
+        """Anonymous callers (keyed by address) and their usage in a period,
+        heaviest first."""
+        with self._s.lock:
+            cur = self._s.db.execute(
+                "SELECT client, engine_seconds, calls FROM usage"
+                " WHERE client LIKE 'ip:%' AND period=? ORDER BY engine_seconds DESC LIMIT ?",
+                (period, limit))
+            return [dict(row) for row in cur.fetchall()]

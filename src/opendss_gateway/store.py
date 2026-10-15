@@ -92,6 +92,17 @@ class Store:
             self.db.execute("PRAGMA synchronous=NORMAL")
             self.db.execute("PRAGMA foreign_keys=ON")
             self.db.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Columns added after the first release. ``executescript`` only
+        creates missing tables, so an existing database gets them here;
+        each step is idempotent."""
+        have = {row["name"] for row in self.db.execute("PRAGMA table_info(users)")}
+        if "plan_override" not in have:
+            # An operator-set plan that wins over the Stripe-derived one, so a
+            # comped account survives subscription webhooks. NULL = none.
+            self.db.execute("ALTER TABLE users ADD COLUMN plan_override TEXT")
 
     def close(self) -> None:
         with self.lock:
@@ -110,10 +121,16 @@ class User:
     last_seen: float
     session_epoch: int
     disabled: bool
+    plan_override: str | None = None
 
     @property
     def client_key(self) -> str:
         return f"user:{self.id}"
+
+    @property
+    def effective_plan(self) -> str:
+        """The plan admission uses: an operator override, else what billing set."""
+        return self.plan_override or self.plan
 
 
 @dataclass(frozen=True)
@@ -129,7 +146,24 @@ def _user(row: sqlite3.Row | None) -> User | None:
         return None
     return User(id=row["id"], email=row["email"], name=row["name"], plan=row["plan"],
                 created=row["created"], last_seen=row["last_seen"],
-                session_epoch=row["session_epoch"], disabled=bool(row["disabled"]))
+                session_epoch=row["session_epoch"], disabled=bool(row["disabled"]),
+                plan_override=row["plan_override"])
+
+
+@dataclass(frozen=True)
+class UserSummary:
+    """One row of the admin listing: the user plus what the other tables say
+    about them."""
+    user: User
+    providers: tuple[str, ...]
+    sub_status: str | None
+    sub_period_end: float | None
+    sub_cancel_at_period_end: bool
+    total_seconds: float
+    total_calls: int
+    #: Usage keyed by period ("YYYY-MM" and "YYYY-MM-DD" for the current
+    #: month and day); the caller picks the one the plan meters by.
+    usage: dict[str, float]
 
 
 class Users:
@@ -196,9 +230,61 @@ class Users:
         with self._s.lock:
             self._s.db.execute("UPDATE users SET plan=? WHERE id=?", (plan, user_id))
 
+    def set_override(self, user_id: int, plan: str | None) -> None:
+        """Pin a plan regardless of billing (None clears the pin)."""
+        with self._s.lock:
+            self._s.db.execute("UPDATE users SET plan_override=? WHERE id=?", (plan, user_id))
+
+    def set_disabled(self, user_id: int, disabled: bool) -> None:
+        """A disabled account is treated as a guest; disabling also kills its
+        sessions so the change is immediate."""
+        with self._s.lock:
+            if disabled:
+                self._s.db.execute(
+                    "UPDATE users SET disabled=1, session_epoch = session_epoch + 1 WHERE id=?",
+                    (user_id,))
+            else:
+                self._s.db.execute("UPDATE users SET disabled=0 WHERE id=?", (user_id,))
+
     def count(self) -> int:
         with self._s.lock:
             return int(self._s.db.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+
+    def summaries(self, periods: tuple[str, ...]) -> list[UserSummary]:
+        """Every user, newest first, with providers, subscription and usage.
+        Three small queries rather than one wide join: the tables are tiny
+        and this keeps each piece readable."""
+        with self._s.lock:
+            db = self._s.db
+            users = [_user(r) for r in db.execute("SELECT * FROM users ORDER BY created DESC")]
+            providers: dict[int, list[str]] = {}
+            for r in db.execute("SELECT user_id, provider FROM identities ORDER BY created"):
+                providers.setdefault(r["user_id"], []).append(r["provider"])
+            subs = {r["user_id"]: r for r in db.execute(
+                "SELECT user_id, status, current_period_end, cancel_at_period_end FROM subscriptions")}
+            totals = {r["client"]: (float(r["s"]), int(r["c"])) for r in db.execute(
+                "SELECT client, SUM(engine_seconds) AS s, SUM(calls) AS c FROM usage"
+                " WHERE client LIKE 'user:%' GROUP BY client")}
+            usage: dict[str, dict[str, float]] = {}
+            if periods:
+                marks = ",".join("?" * len(periods))
+                for r in db.execute(
+                        f"SELECT client, period, engine_seconds FROM usage WHERE period IN ({marks})"
+                        " AND client LIKE 'user:%'", periods):
+                    usage.setdefault(r["client"], {})[r["period"]] = float(r["engine_seconds"])
+        out = []
+        for u in users:
+            assert u is not None
+            sub = subs.get(u.id)
+            total = totals.get(u.client_key, (0.0, 0))
+            out.append(UserSummary(
+                user=u, providers=tuple(providers.get(u.id, ())),
+                sub_status=sub["status"] if sub else None,
+                sub_period_end=sub["current_period_end"] if sub else None,
+                sub_cancel_at_period_end=bool(sub["cancel_at_period_end"]) if sub else False,
+                total_seconds=total[0], total_calls=total[1],
+                usage=usage.get(u.client_key, {})))
+        return out
 
     # -- magic links --------------------------------------------------------
 

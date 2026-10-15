@@ -33,13 +33,24 @@ a{color:var(--accent)}
 nav.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem}
 nav.top .brand{font-weight:700;color:var(--ink);text-decoration:none}
 nav.top .btn{padding:.4rem .8rem}
+main.wide{max-width:72rem}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));gap:.6rem;margin:.5rem 0 1rem}
+.tile{border:1px solid var(--line);border-radius:8px;padding:.6rem .8rem;background:var(--bg)}
+.tile b{display:block;font-size:1.3rem}.tile small{display:block}
+.scroll{overflow-x:auto}.scroll table{min-width:56rem}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+form.inline{display:inline-flex;gap:.3rem;align-items:center;margin:0 .2rem 0 0}
+form.inline button,form.inline select{font:inherit;font-size:.85em;padding:.2rem .5rem;border:1px solid var(--line);border-radius:5px;background:#fff}
+.tag{display:inline-block;font-size:.8em;padding:0 .4rem;border-radius:4px;border:1px solid var(--line);color:var(--muted)}
+.tag.pro{background:#dafbe1;border-color:#9be9a8;color:#1a4d2b}.tag.off{background:#fff1f0;border-color:#ffa39e;color:#7a1f1a}
+.tag.pin{background:#fff8c5;border-color:#d4a72c;color:#4d2d00}
 """
 
 
-def layout(title: str, body: str, *, app_url: str = "/") -> str:
+def layout(title: str, body: str, *, app_url: str = "/", wide: bool = False) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{h(title)} · OpenDSS Designer</title>
-<style>{_STYLE}</style></head><body><main>
+<style>{_STYLE}</style></head><body><main{' class="wide"' if wide else ''}>
 <nav class="top"><a class="brand" href="{h(app_url)}">OpenDSS Designer</a><a class="btn" href="{h(app_url)}">&larr; Back to the designer</a></nav>
 {body}
 <footer><a href="{h(app_url)}">Back to the designer</a> · <a href="/legal/privacy">Privacy</a> · <a href="/legal/terms">Terms</a> ·
@@ -117,6 +128,9 @@ def billing_section(plan: Plan, pro: Plan | None, billing: dict, csrf: str) -> s
 <form method="post" action="/billing/portal"><input type="hidden" name="csrf" value="{h(csrf)}">
 <button type="submit">Manage billing</button></form>
 <p><small>Change the card, download invoices, or cancel. Cancelling keeps Pro until the end of the paid period.</small></p>"""
+    if plan.id == "pro":
+        # Pro without a subscription: pinned by the operator. Nothing to pay.
+        return '<h2>Billing</h2><p>Pro is on this account courtesy of the operator; there is nothing to pay.</p>'
     if pro is None:
         return ""
     limits = pro.limits
@@ -136,8 +150,10 @@ def billing_message(title: str, text: str, *, error: bool = False) -> str:
 
 def account(user: User, plan: Plan, used: float, identities: list[Identity], csrf: str,
             *, recent: list[dict], support_email: str, billing: dict | None = None,
-            pro: Plan | None = None) -> str:
+            pro: Plan | None = None, admin: bool = False) -> str:
     billing_html = billing_section(plan, pro, billing or {}, csrf)
+    if admin:
+        billing_html += '<p><a class="btn" href="/admin">Operator dashboard</a></p>'
     budget = plan.budget_seconds or 0
     pct = min(100, round(100 * used / budget)) if budget else 0
     usage = (f'<p>{h(_minutes(used))} of {h(_minutes(budget))} of solver time used {h(plan.period_phrase())}.</p>'
@@ -285,3 +301,141 @@ limits, plans and these terms may change; material changes are announced on this
 <h2>Contact</h2>
 <p>{contact}.</p>
 </div>""")
+
+
+# --- operator dashboard ---------------------------------------------------------
+
+def _when(ts: float | None) -> str:
+    if not ts:
+        return "–"
+    return datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%d %H:%M")
+
+
+def _ago(ts: float | None, now: float | None = None) -> str:
+    if not ts:
+        return "never"
+    delta = (now or datetime.now(UTC).timestamp()) - ts
+    if delta < 90:
+        return "just now"
+    if delta < 5400:
+        return f"{delta / 60:.0f} min ago"
+    if delta < 172800:
+        return f"{delta / 3600:.0f} h ago"
+    return f"{delta / 86400:.0f} d ago"
+
+
+def _secs(value: float) -> str:
+    return _minutes(value) if value >= 60 else f"{value:.1f} s"
+
+
+def _tile(label: str, value: str, sub: str = "") -> str:
+    return f'<div class="tile"><small>{h(label)}</small><b>{h(value)}</b><small>{h(sub)}</small></div>'
+
+
+def admin(*, admin: User, users: list, plans: dict[str, Plan], overview: dict,
+          guests: list[dict], guest_plan: Plan, recent: list[dict], emails: dict[str, str],
+          csrf: str, health: dict, note: str | None = None) -> str:
+    """The operator's view: who has signed up, what they use, what they pay
+    for, plus the levers (plan pin, disable, sign out). `users` is a list of
+    (UserSummary, engine-seconds this period, Plan | None)."""
+    day, month = overview["day"], overview["month"]
+    n_pro = sum(1 for s, _, _ in users if s.user.effective_plan == "pro")
+    n_paying = sum(1 for s, _, _ in users if s.sub_status in ("active", "trialing", "past_due"))
+    tiles = "".join([
+        _tile("Accounts", f"{len(users):,}", f"{n_pro} on Pro, {n_paying} paying"),
+        _tile("Runs, 24 h", f"{day['runs']:,}", f"{day['failed']} failed · {_secs(day['seconds'])} engine"),
+        _tile("Runs, 30 d", f"{month['runs']:,}", f"{month['failed']} failed · {_secs(month['seconds'])} engine"),
+        _tile("Callers, 30 d", f"{month['members'] + month['guests']:,}",
+              f"{month['members']} signed in, {month['guests']} guest addresses"),
+        _tile("Now", f"{health['inflight']} running", f"{health['queued']} queued · {health['workers']} workers"),
+    ])
+    note_html = f'<p class="ok">{h(note)}</p>' if note else ""
+    plan_options = [(pid, p.name) for pid, p in plans.items() if pid != "guest"]
+
+    rows = []
+    for s, used, plan in users:
+        u = s.user
+        budget = plan.budget_seconds if plan else None
+        usage = f"{_secs(used)} / {_minutes(budget)} {plan.period_phrase()}" if (plan and budget) \
+            else _secs(used)
+        tags = []
+        if u.plan_override:
+            tags.append('<span class="tag pin" title="Set by an operator; billing cannot change it">'
+                        'pinned</span>')
+        if u.disabled:
+            tags.append('<span class="tag off">disabled</span>')
+        if u.email.lower() == admin.email.lower():
+            tags.append('<span class="tag">you</span>')
+        sub = "–"
+        if s.sub_status:
+            sub = s.sub_status
+            if s.sub_period_end:
+                sub += (" · ends " if s.sub_cancel_at_period_end else " · renews ") + \
+                    datetime.fromtimestamp(s.sub_period_end, UTC).strftime("%Y-%m-%d")
+        plan_cls = "pro" if u.effective_plan == "pro" else ""
+        options = "".join(
+            f'<option value="{h(pid)}"{" selected" if pid == u.effective_plan else ""}>{h(name)}</option>'
+            for pid, name in plan_options)
+        action = f"/admin/users/{u.id}"
+        hidden = f'<input type="hidden" name="csrf" value="{h(csrf)}">'
+        controls = (
+            f'<form class="inline" method="post" action="{action}/plan">{hidden}'
+            f'<select name="plan">{options}</select><button type="submit">Pin</button></form>'
+            + (f'<form class="inline" method="post" action="{action}/plan">{hidden}'
+               f'<input type="hidden" name="plan" value=""><button type="submit">Unpin</button></form>'
+               if u.plan_override else "")
+            + f'<form class="inline" method="post" action="{action}/disabled">{hidden}'
+              f'<input type="hidden" name="disabled" value="{0 if u.disabled else 1}">'
+              f'<button type="submit">{"Enable" if u.disabled else "Disable"}</button></form>'
+            + f'<form class="inline" method="post" action="{action}/signout">{hidden}'
+              f'<button type="submit">Sign out</button></form>')
+        rows.append(
+            f'<tr><td>{u.id}</td><td>{h(u.email)}{("<br><small>" + h(u.name) + "</small>") if u.name else ""}'
+            f'</td><td>{", ".join(h(_PROVIDER_LABELS.get(p, p)) for p in s.providers) or "–"}</td>'
+            f'<td><span class="tag {plan_cls}">{h(plans[u.effective_plan].name if u.effective_plan in plans else u.effective_plan)}'
+            f'</span> {" ".join(tags)}</td>'
+            f'<td>{h(sub)}</td><td class="num">{h(usage)}</td>'
+            f'<td class="num">{s.total_calls:,}<br><small>{h(_secs(s.total_seconds))}</small></td>'
+            f'<td title="{h(_when(u.created))}">{h(_ago(u.created))}</td>'
+            f'<td title="{h(_when(u.last_seen))}">{h(_ago(u.last_seen))}</td>'
+            f'<td>{controls}</td></tr>')
+    users_html = "".join(rows) or '<tr><td colspan="10" class="muted">No accounts yet.</td></tr>'
+
+    guest_rows = "".join(
+        f'<tr><td>{h(g["client"].removeprefix("ip:"))}</td><td class="num">{int(g["calls"]):,}</td>'
+        f'<td class="num">{h(_secs(float(g["engine_seconds"])))}</td></tr>' for g in guests) \
+        or '<tr><td colspan="3" class="muted">No guest runs yet today.</td></tr>'
+    guest_budget = _minutes(guest_plan.budget_seconds) if guest_plan.budget_seconds else "unmetered"
+
+    run_rows = "".join(
+        f'<tr><td title="{h(_when(r["ts"]))}">{h(_ago(r["ts"]))}</td>'
+        f'<td>{h(emails.get(r["client"], r["client"].removeprefix("ip:")))}</td>'
+        f'<td>{h(r["plan"])}</td><td>{h(r["path"].removeprefix("/api/"))}</td>'
+        f'<td class="num">{r["engine_seconds"]:.2f} s</td><td class="num">{r["queue_seconds"]:.1f} s</td>'
+        f'<td>{h(r["status"])}</td><td>{h(r["worker"] or "")}</td></tr>' for r in recent) \
+        or '<tr><td colspan="8" class="muted">No runs yet.</td></tr>'
+
+    signin = ", ".join([*(_PROVIDER_LABELS.get(p, p) for p in health["providers"]),
+                        *(["Email link"] if health["email"] else [])]) or "none"
+    return layout("Operator", f"""
+<div class="card"><h1>Operator dashboard</h1>
+<p class="muted">Gateway {h(health['version'])} · sign-in: {h(signin)} · billing {"on" if health['billing'] else "off"} ·
+signed in as {h(admin.email)}. All times UTC.</p>
+{note_html}
+<div class="tiles">{tiles}</div>
+
+<h2>Accounts</h2>
+<p class="muted"><small><b>Pin</b> sets a plan the user keeps regardless of billing (comp a Pro, or hold someone on Free);
+<b>Unpin</b> hands the decision back to Stripe. <b>Disable</b> turns the account into a guest and signs it out everywhere.</small></p>
+<div class="scroll"><table><thead><tr><th>#</th><th>Email</th><th>Sign-in</th><th>Plan</th><th>Subscription</th>
+<th>Used this period</th><th>Runs · engine time, all time</th><th>Joined</th><th>Last seen</th><th></th></tr></thead>
+<tbody>{users_html}</tbody></table></div>
+
+<h2>Guests today</h2>
+<p class="muted"><small>Anonymous callers keyed by address, budget {h(guest_budget)} per day. Heaviest first, top {len(guests)} shown.</small></p>
+<table><thead><tr><th>Address</th><th>Runs</th><th>Engine time</th></tr></thead><tbody>{guest_rows}</tbody></table>
+
+<h2>Recent runs</h2>
+<div class="scroll"><table><thead><tr><th>When</th><th>Caller</th><th>Plan</th><th>Call</th><th>Engine</th><th>Queued</th>
+<th>Result</th><th>Worker</th></tr></thead><tbody>{run_rows}</tbody></table></div>
+</div>""", wide=True)

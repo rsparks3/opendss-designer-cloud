@@ -161,7 +161,7 @@ class Gateway:
         if claims is not None:
             user = self.users.get(claims.user_id)
             if user is not None and not user.disabled and user.session_epoch == claims.epoch:
-                plan = self.plans.get(user.plan) or self.plans["free"]
+                plan = self.plans.get(user.effective_plan) or self.plans["free"]
                 return Caller(user.client_key, plan, user, refresh_session=claims.stale)
         return Caller(f"ip:{self.client_ip(request)}", self.plans["guest"])
 
@@ -233,6 +233,19 @@ class Gateway:
     @property
     def public_host(self) -> str:
         return self.cfg.public_url.split("//", 1)[-1]
+
+    # -- operator ------------------------------------------------------------
+
+    def is_admin(self, user: User | None) -> bool:
+        return user is not None and user.email.lower() in self.cfg.admin_emails
+
+    def admin_periods(self) -> tuple[str, ...]:
+        """The period keys the admin listing needs: one per budget period in use."""
+        return tuple(sorted({p.period_key() for p in self.plans.values()}))
+
+    def period_for(self, plan_id: str) -> str:
+        plan = self.plans.get(plan_id) or self.plans["free"]
+        return plan.period_key()
 
 
 def request_id_for(request: Request) -> str:
@@ -416,8 +429,114 @@ def create_app(cfg: Config, transport: httpx.AsyncBaseTransport | None = None,
                              billing={"enabled": gw.stripe.enabled,
                                       "price_text": cfg.pro_price_text,
                                       "subscription": gw.subscriptions.get(caller.user.id)},
-                             pro=gw.plans.get("pro"))
+                             pro=gw.plans.get("pro"), admin=gw.is_admin(caller.user))
         return gw.finish(_page(html), caller)
+
+    # -- operator ------------------------------------------------------------
+    # One page, allowlisted by email. Anyone else gets the same 404 a route
+    # that does not exist would give, so the page's presence is not a signal.
+
+    _ADMIN_NOTES = {
+        "plan": "Plan updated.", "cleared": "Override cleared; billing decides the plan again.",
+        "disabled": "Account disabled and signed out everywhere.",
+        "enabled": "Account enabled.", "signedout": "Signed out everywhere.",
+        "self": "You cannot disable your own account from here.",
+        "unknown": "No such user.", "badplan": "No such plan.",
+        "expired": "That form had expired. Try again.",
+    }
+
+    def _not_found() -> Response:
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+    def _admin_caller(request: Request) -> Caller | Response:
+        caller = gw.identify(request)
+        if caller.user is None:
+            return RedirectResponse("/auth/signin", status_code=303)
+        if not gw.is_admin(caller.user):
+            return _not_found()
+        return caller
+
+    def _back(note: str) -> Response:
+        return RedirectResponse(f"/admin?note={note}", status_code=303)
+
+    @app.get("/admin")
+    async def admin_page(request: Request, note: str = "") -> Response:
+        caller = _admin_caller(request)
+        if isinstance(caller, Response):
+            return caller
+        assert caller.user is not None
+        summaries = gw.users.summaries(gw.admin_periods())
+        users = [(s, s.usage.get(gw.period_for(s.user.effective_plan), 0.0),
+                  gw.plans.get(s.user.effective_plan)) for s in summaries]
+        guest_period = gw.plans["guest"].period_key()
+        emails = {s.user.client_key: s.user.email for s in summaries}
+        html = pages.admin(
+            admin=caller.user, users=users, plans=gw.plans,
+            overview=gw.ledger.overview(),
+            guests=gw.ledger.guests(guest_period), guest_plan=gw.plans["guest"],
+            recent=gw.ledger.recent(40), emails=emails,
+            csrf=auth.csrf_token(gw.signer, caller.user.id),
+            health={"version": __version__, "workers": len(cfg.workers),
+                    "inflight": gw.scheduler.inflight, "queued": gw.scheduler.depth,
+                    "billing": gw.stripe.enabled, "providers": sorted(gw.providers),
+                    "email": gw.email_signin},
+            note=_ADMIN_NOTES.get(note))
+        return gw.finish(_page(html), caller)
+
+    def _admin_action(request: Request, user_id: int, csrf: str):
+        """Shared preamble: admin, CSRF, target exists. Returns (admin, target)
+        or the response to send instead."""
+        caller = _admin_caller(request)
+        if isinstance(caller, Response):
+            return caller
+        assert caller.user is not None
+        if not auth.check_csrf(gw.signer, csrf, caller.user.id):
+            return _back("expired")
+        target = gw.users.get(user_id)
+        if target is None:
+            return _back("unknown")
+        return caller.user, target
+
+    @app.post("/admin/users/{user_id}/plan")
+    async def admin_set_plan(request: Request, user_id: int, csrf: str = Form(""),
+                             plan: str = Form("")) -> Response:
+        got = _admin_action(request, user_id, csrf)
+        if isinstance(got, Response):
+            return got
+        admin, target = got
+        if not plan:
+            gw.users.set_override(target.id, None)
+            logger.info("admin %s cleared plan override for user %s", admin.email, target.id)
+            return _back("cleared")
+        if plan not in gw.plans or plan == "guest":
+            return _back("badplan")
+        gw.users.set_override(target.id, plan)
+        logger.info("admin %s set plan override %s for user %s", admin.email, plan, target.id)
+        return _back("plan")
+
+    @app.post("/admin/users/{user_id}/disabled")
+    async def admin_set_disabled(request: Request, user_id: int, csrf: str = Form(""),
+                                 disabled: str = Form("")) -> Response:
+        got = _admin_action(request, user_id, csrf)
+        if isinstance(got, Response):
+            return got
+        admin, target = got
+        off = disabled == "1"
+        if off and target.id == admin.id:
+            return _back("self")
+        gw.users.set_disabled(target.id, off)
+        logger.info("admin %s %s user %s", admin.email, "disabled" if off else "enabled", target.id)
+        return _back("disabled" if off else "enabled")
+
+    @app.post("/admin/users/{user_id}/signout")
+    async def admin_signout(request: Request, user_id: int, csrf: str = Form("")) -> Response:
+        got = _admin_action(request, user_id, csrf)
+        if isinstance(got, Response):
+            return got
+        admin, target = got
+        gw.users.bump_epoch(target.id)
+        logger.info("admin %s signed out user %s everywhere", admin.email, target.id)
+        return _back("signedout")
 
     # -- billing --------------------------------------------------------------
 

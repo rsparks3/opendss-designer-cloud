@@ -91,6 +91,11 @@ class Config:
     #: Shown next to the Upgrade button; the real price lives in Stripe.
     pro_price_text: str = "$5 / month"
 
+    # -- operations -----------------------------------------------------------
+    #: Signed-in users with one of these email addresses (lower-cased) see
+    #: ``/admin``. Empty means the page does not exist for anyone.
+    admin_emails: frozenset[str] = frozenset()
+
     @property
     def guest_workers(self) -> int:
         n = self.guest_max_workers or len(self.workers)
@@ -150,4 +155,6 @@ class Config:
             stripe_automatic_tax=_bool(env.get("STRIPE_AUTOMATIC_TAX"), False),
             pro_price_text=_str(env, "GATEWAY_PRO_PRICE_TEXT", cls.pro_price_text),
             support_email=_str(env, "GATEWAY_SUPPORT_EMAIL"),
+            admin_emails=frozenset(a.strip().lower() for a in
+                                   env.get("GATEWAY_ADMIN_EMAILS", "").split(",") if a.strip()),
         )
