@@ -43,6 +43,10 @@ class Config:
     client_ip_header: str = "x-forwarded-for"
     #: Waiting requests beyond this are refused with 503 rather than queued.
     max_queue: int = 16
+    #: Largest request body the gateway will buffer and forward. Set it with
+    #: the workers' OPENDSS_DESIGNER_MAX_BODY_BYTES in mind: the worker's own
+    #: message is the readable one, this is the backstop above it.
+    max_body_bytes: int = 12 * 1024 * 1024
     #: Longest a non-streaming call waits for a worker. Keep it under the CDN's
     #: origin timeout (Cloudflare: 100 s) with room for the solve itself.
     queue_wait_s: float = 45.0
@@ -125,6 +129,8 @@ class Config:
             plans_path=Path(plans) if plans else None,
             client_ip_header=_str(env, "GATEWAY_CLIENT_IP_HEADER", cls.client_ip_header).lower(),
             max_queue=_num(env.get("GATEWAY_MAX_QUEUE"), cls.max_queue, int),
+            max_body_bytes=max(1024, _num(env.get("GATEWAY_MAX_BODY_BYTES"),
+                                          cls.max_body_bytes, int)),
             queue_wait_s=_num(env.get("GATEWAY_QUEUE_WAIT_S"), cls.queue_wait_s, float),
             guest_max_workers=_num(env.get("GATEWAY_GUEST_MAX_WORKERS"), None, int),
             upstream_timeout_s=_num(env.get("GATEWAY_UPSTREAM_TIMEOUT_S"),

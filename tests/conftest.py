@@ -62,6 +62,16 @@ def make_fake_worker() -> FastAPI:
                             headers={"X-Engine-Seconds": f"{delay + 0.01:.3f}",
                                      "X-Request-ID": request.headers.get("x-request-id", "")})
 
+    @fake.post("/api/import/convert")
+    async def import_convert(request: Request):
+        # The worker runs the converter in a child process and reports its
+        # time the way it reports engine time.
+        body = await request.json()
+        delay = float(body.get("sleep", 0))
+        await asyncio.sleep(delay)
+        return JSONResponse({"circuit": {"nodes": []}, "received": seen(request)},
+                            headers={"X-Engine-Seconds": f"{delay + 0.01:.3f}"})
+
     @fake.post("/api/timeseries")
     async def timeseries(request: Request):
         body = await request.json()

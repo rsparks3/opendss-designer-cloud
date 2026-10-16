@@ -134,11 +134,13 @@ def billing_section(plan: Plan, pro: Plan | None, billing: dict, csrf: str) -> s
     if pro is None:
         return ""
     limits = pro.limits
+    extras = "".join(f" {h(label)}." for key, label in _FEATURE_LABELS.items()
+                     if pro.allows(key) and not plan.allows(key))
     return f"""<h2>Pro · {h(billing.get("price_text", ""))}</h2>
 <p>{int(limits.get("maxNodes", 0)):,} elements per circuit, time-series runs up to
 {limits.get("timeseriesTimeoutS", 0):g} s and cost {int(limits.get("maxTimeseriesCost", 0)):,},
 {h(_minutes(pro.budget_seconds or 0))} of solver time {h(pro.period_phrase())}, {pro.concurrency} runs at once,
-first in the queue.</p>
+first in the queue.{extras}</p>
 <form method="post" action="/billing/checkout"><input type="hidden" name="csrf" value="{h(csrf)}">
 <button type="submit" class="primary">Upgrade to Pro</button></form>
 <p><small>Payment is handled by Stripe; no card details reach this site. Cancel any time from this page.</small></p>"""
@@ -161,6 +163,8 @@ def account(user: User, plan: Plan, used: float, identities: list[Identity], csr
              else "<p>Unmetered.</p>")
     limits = "".join(f"<tr><td>{h(_LIMIT_LABELS.get(k, k))}</td><td>{h(_fmt_limit(k, v))}</td></tr>"
                      for k, v in plan.limits.items())
+    limits += "".join(f"<tr><td>{h(_FEATURE_LABELS.get(k, k))}</td>"
+                      f"<td>{'Yes' if plan.allows(k) else 'No'}</td></tr>" for k in plan.features)
     ids = "".join(
         f"<tr><td>{h(_PROVIDER_LABELS.get(i.provider, i.provider))}</td><td>{h(i.email or i.subject)}</td></tr>"
         for i in identities)
@@ -193,6 +197,7 @@ _LIMIT_LABELS = {"maxNodes": "Elements per circuit", "maxEdges": "Connections pe
                  "maxShapes": "Load shapes", "maxShapePoints": "Points per shape",
                  "maxTotalShapePoints": "Total shape points", "maxImportFiles": "Files per import",
                  "maxImportBytes": "Bytes per imported file"}
+_FEATURE_LABELS = {"convert": "CYME and Synergi import"}
 _PROVIDER_LABELS = {"email": "Email link", "github": "GitHub", "google": "Google"}
 
 

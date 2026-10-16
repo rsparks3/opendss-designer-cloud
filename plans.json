@@ -9,7 +9,8 @@
       "maxEdges": 20,
       "maxTimeseriesCost": 250000,
       "engineResultTimeoutS": 30,
-      "timeseriesTimeoutS": 30
+      "timeseriesTimeoutS": 30,
+      "maxImportBytes": 2097152
     },
     "budget_seconds": 10,
     "budget_period": "day",
@@ -19,7 +20,10 @@
         "label": "Sign in",
         "url": "/auth/signin"
       }
-    ]
+    ],
+    "features": {
+      "convert": "CYME and Synergi import is part of the Pro plan. Sign in, then upgrade from your account page."
+    }
   },
   "free": {
     "name": "Free",
@@ -31,7 +35,8 @@
       "maxEdges": 100,
       "maxTimeseriesCost": 1000000,
       "engineResultTimeoutS": 90,
-      "timeseriesTimeoutS": 90
+      "timeseriesTimeoutS": 90,
+      "maxImportBytes": 2097152
     },
     "budget_seconds": 30,
     "budget_period": "day",
@@ -41,7 +46,10 @@
         "label": "Account",
         "url": "/account"
       }
-    ]
+    ],
+    "features": {
+      "convert": "CYME and Synergi import is part of the Pro plan. Upgrade from your account page."
+    }
   },
   "pro": {
     "name": "Pro",
@@ -53,7 +61,8 @@
       "maxEdges": 2000,
       "maxTimeseriesCost": 3000000,
       "engineResultTimeoutS": 90,
-      "timeseriesTimeoutS": 600
+      "timeseriesTimeoutS": 600,
+      "maxImportBytes": 25165824
     },
     "budget_seconds": 3600,
     "budget_period": "month",
@@ -63,6 +72,9 @@
         "label": "Account",
         "url": "/account"
       }
-    ]
+    ],
+    "features": {
+      "convert": true
+    }
   }
 }

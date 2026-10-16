@@ -45,7 +45,10 @@ from .store import Store, Subscriptions, User, Users
 
 logger = logging.getLogger(__name__)
 
-ENGINE_PATHS = frozenset({"/api/solve", "/api/faultstudy", "/api/import/dss"})
+#: Calls that hold a worker's engine (or, for a conversion, its CPU) and
+#: report how long for: one scheduler slot each, debited to the ledger.
+ENGINE_PATHS = frozenset({"/api/solve", "/api/faultstudy", "/api/import/dss",
+                          "/api/import/convert"})
 STREAM_PATH = "/api/timeseries"
 
 _HOP_BY_HOP = frozenset({
@@ -184,8 +187,10 @@ class Gateway:
         out = {k: v for k, v in request.headers.items()
                if k.lower() not in _HOP_BY_HOP and k.lower() not in _PRIVATE
                and k.lower() != limits_key}
-        out[self.cfg.limits_header] = json.dumps(
-            {**plan.limits, "plan": self.plan_block(plan, used)}, separators=(",", ":"))
+        overlay: dict = {**plan.limits, "plan": self.plan_block(plan, used)}
+        if plan.features:
+            overlay["features"] = plan.features
+        out[self.cfg.limits_header] = json.dumps(overlay, separators=(",", ":"))
         out["X-Request-ID"] = request_id
         return out
 
@@ -673,8 +678,10 @@ def _busy(detail: str, retry: int = 10) -> JSONResponse:
 
 
 #: The gateway buffers a request body before forwarding it. Workers cap
-#: bodies at 8 MB with a readable message; this is the backstop above that
-#: so a client cannot make the gateway itself hold an arbitrary amount.
+#: bodies with a readable message; this is the backstop above that so a
+#: client cannot make the gateway itself hold an arbitrary amount. The
+#: default suits the app's 8 MB demo cap; a deployment that lets Pro upload
+#: Synergi databases raises both (``GATEWAY_MAX_BODY_BYTES``).
 MAX_BODY_BYTES = 12 * 1024 * 1024
 
 
@@ -682,31 +689,32 @@ class _BodyTooLarge(Exception):
     pass
 
 
-async def _read_body(request: Request) -> bytes:
+async def _read_body(request: Request, limit: int = MAX_BODY_BYTES) -> bytes:
     declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+    if declared and declared.isdigit() and int(declared) > limit:
         raise _BodyTooLarge
     chunks: list[bytes] = []
     seen = 0
     async for chunk in request.stream():
         seen += len(chunk)
-        if seen > MAX_BODY_BYTES:
+        if seen > limit:
             raise _BodyTooLarge
         chunks.append(chunk)
     return b"".join(chunks)
 
 
-def _too_large() -> JSONResponse:
-    return JSONResponse({"detail": "Request too large (limit 12 MB)."}, status_code=413)
+def _too_large(limit: int = MAX_BODY_BYTES) -> JSONResponse:
+    return JSONResponse({"detail": f"Request too large (limit {limit // (1024 * 1024)} MB)."},
+                        status_code=413)
 
 
 async def _passthrough(gw: Gateway, request: Request, path: str, caller: Caller,
                        request_id: str) -> Response:
     _, used = gw.usage(caller)
     try:
-        body = await _read_body(request)
+        body = await _read_body(request, gw.cfg.max_body_bytes)
     except _BodyTooLarge:
-        return _too_large()
+        return _too_large(gw.cfg.max_body_bytes)
     worker = gw.next_worker()
     upstream = await gw.client.request(
         request.method, worker + path, params=request.query_params,
@@ -724,9 +732,9 @@ async def _engine_call(gw: Gateway, request: Request, path: str, caller: Caller,
         return JSONResponse({"detail": plan.exhausted_message()}, status_code=429,
                             headers={"X-Request-ID": request_id})
     try:
-        body = await _read_body(request)
+        body = await _read_body(request, gw.cfg.max_body_bytes)
     except _BodyTooLarge:
-        return _too_large()
+        return _too_large(gw.cfg.max_body_bytes)
     job = Job(client=caller.client, plan_id=plan.id, priority=plan.priority,
               pool=plan.pool, concurrency=plan.concurrency)
     try:
@@ -765,9 +773,9 @@ async def _stream_call(gw: Gateway, request: Request, path: str, caller: Caller,
         return JSONResponse({"detail": plan.exhausted_message()}, status_code=429,
                             headers={"X-Request-ID": request_id})
     try:
-        body = await _read_body(request)
+        body = await _read_body(request, gw.cfg.max_body_bytes)
     except _BodyTooLarge:
-        return _too_large()
+        return _too_large(gw.cfg.max_body_bytes)
     headers = gw.upstream_headers(request, plan, used, request_id)
     job = Job(client=caller.client, plan_id=plan.id, priority=plan.priority,
               pool=plan.pool, concurrency=plan.concurrency)

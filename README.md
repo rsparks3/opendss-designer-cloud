@@ -17,17 +17,19 @@ The half of the contract the *worker* implements (the trusted limits header,
 `X-Engine-Seconds`, request ids) is documented in the app's
 [deployment guide](https://opendssdesigner-docs.ryanmsparks.com/deployment/).
 
-**Status: v0.3, guests, free accounts and a paid plan.** A guest is keyed by
+**Status: v0.5, guests, free accounts, a paid plan, an operator page, and
+plan-gated features.** A guest is keyed by
 client address with a daily engine-time budget. Signing in (email magic link,
 GitHub or Google; no passwords) moves a caller to the Free plan. A Stripe
 subscription moves them to Pro. With no Stripe keys the billing routes do not
-exist and self-hosters see no Upgrade button.
+exist and self-hosters see no Upgrade button. A plan can withhold a worker
+feature (today: CYME/Synergi import) from its callers.
 
 ## What it does per request
 
 | Route | Slot? | What happens |
 | --- | --- | --- |
-| `/api/solve`, `/api/faultstudy`, `/api/import/dss` | yes | budget check → wait for a worker → forward with the limits header → read `X-Engine-Seconds` → debit the ledger |
+| `/api/solve`, `/api/faultstudy`, `/api/import/dss`, `/api/import/convert` | yes | budget check → wait for a worker → forward with the limits header → read `X-Engine-Seconds` → debit the ledger |
 | `/api/timeseries` | yes | same, but the SSE response starts immediately (`: queued` comments while waiting, so a CDN never sees a silent origin) and the engine time is read off the stream's final event |
 | everything else under `/api` | no | round-robin to a worker, limits header attached so `/api/health` describes the caller's plan |
 | `/gw/health` | – | the gateway's own liveness: workers, in-flight, queued, draining |
@@ -56,8 +58,13 @@ exits. A deploy costs at most the runs that were longer than that.
 ## Plans
 
 `plans.json` is data: limits (keys mirror the worker's header), a budget in
-engine-seconds per day or month, concurrency, priority, pool, and the banner
-message. Edit a copy and point `GATEWAY_PLANS` at it; no release needed.
+engine-seconds per day or month, concurrency, priority, pool, the banner
+message, and `features`: worker features the plan may use. `"convert": true`
+allows CYME/Synergi import; `false`, or a sentence, withholds it, and the
+sentence is what the designer shows when the locked menu item is clicked
+(which plan has it, how to get there). The worker keeps listing the formats,
+so the feature stays visible. Edit a copy and point `GATEWAY_PLANS` at it;
+no release needed.
 
 ## Accounts
 

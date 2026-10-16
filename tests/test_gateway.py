@@ -153,17 +153,58 @@ async def test_stream_relays_a_refusal_as_an_error_event(gateway):
     assert run["status"] == "http-413" and run["engine_seconds"] == 0
 
 
-async def test_oversized_bodies_are_refused_before_forwarding(gateway):
-    _, client = gateway
-    from opendss_gateway.app import MAX_BODY_BYTES
-    too_big = b"x" * (MAX_BODY_BYTES + 1)
-    res = await client.post("/api/solve", content=too_big,
-                            headers={"Content-Type": "application/json"})
-    assert res.status_code == 413
-    # A lying Content-Length does not help: the stream is counted.
-    res = await client.post("/api/validate", content=too_big,
-                            headers={"Content-Type": "application/json", "Content-Length": "10"})
-    assert res.status_code in (413, 400)
+async def _client(app) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway")
+
+
+async def test_a_plan_may_withhold_a_feature_and_the_worker_hears_why(gateway_factory):
+    plans = guest_plan(features={"convert": "Part of the Pro plan. Sign in to upgrade."})
+    plans["pro"]["features"] = {"convert": True}
+    app = gateway_factory(plans=plans)
+    async with app.router.lifespan_context(app), await _client(app) as client:
+        sent = json.loads((await client.get("/api/health")).json()["received"]["limits"])
+    assert sent["features"] == {"convert": "Part of the Pro plan. Sign in to upgrade."}
+    # A plan with no opinion sends no block, so the worker's default stands.
+    app = gateway_factory(plans=guest_plan())
+    async with app.router.lifespan_context(app), await _client(app) as client:
+        sent = json.loads((await client.get("/api/health")).json()["received"]["limits"])
+    assert "features" not in sent
+
+
+def test_seed_plans_keep_the_converter_for_pro():
+    from opendss_gateway.plans import DEFAULT_PLANS
+    assert DEFAULT_PLANS["pro"].allows("convert")
+    assert not DEFAULT_PLANS["guest"].allows("convert")
+    assert not DEFAULT_PLANS["free"].allows("convert")
+    assert "Pro plan" in DEFAULT_PLANS["free"].features["convert"]
+    # A Synergi model is an Access database of several megabytes.
+    assert DEFAULT_PLANS["pro"].limits["maxImportBytes"] > DEFAULT_PLANS["free"].limits["maxImportBytes"]
+
+
+async def test_a_conversion_takes_a_slot_and_is_metered(gateway):
+    app, client = gateway
+    res = await client.post("/api/import/convert", json={"sleep": 0.02})
+    assert res.status_code == 200
+    (run,) = app.state.gateway.ledger.recent()
+    assert run["path"] == "/api/import/convert" and run["engine_seconds"] >= 0.02
+    assert app.state.gateway.scheduler.inflight == 0
+
+
+async def test_oversized_bodies_are_refused_before_forwarding(gateway_factory):
+    app = gateway_factory(max_body_bytes=64 * 1024)
+    async with app.router.lifespan_context(app), await _client(app) as client:
+        too_big = b"x" * (64 * 1024 + 1)
+        res = await client.post("/api/solve", content=too_big,
+                                headers={"Content-Type": "application/json"})
+        assert res.status_code == 413 and "64 MB" not in res.json()["detail"]
+        # Under the cap, the body goes through.
+        res = await client.post("/api/solve", content=b"{}",
+                                headers={"Content-Type": "application/json"})
+        assert res.status_code == 200
+        # A lying Content-Length does not help: the stream is counted.
+        res = await client.post("/api/validate", content=too_big,
+                                headers={"Content-Type": "application/json", "Content-Length": "10"})
+        assert res.status_code in (413, 400)
 
 
 async def test_pages_link_back_to_the_designer(gateway):

@@ -32,6 +32,14 @@ class Plan:
     #: Banner text. Placeholders: {used}, {budget}, {period}.
     message: str = ""
     links: list[dict[str, str]] = field(default_factory=list)
+    #: Features the worker has that this plan may use: key -> true, or false
+    #: to withhold it, or a sentence to withhold it and tell the caller which
+    #: plan has it. Keys mirror the worker's `features` block ("convert" is
+    #: CYME/Synergi import). Absent means the worker's own default (allowed).
+    features: dict[str, bool | str] = field(default_factory=dict)
+
+    def allows(self, feature: str) -> bool:
+        return self.features.get(feature, True) is True
 
     def period_key(self, now: datetime | None = None) -> str:
         now = now or datetime.now(UTC)
@@ -74,26 +82,34 @@ DEFAULT_PLANS: dict[str, Plan] = {
     "guest": Plan(
         id="guest", name="Guest", priority=10,
         limits={"maxNodes": 10, "maxEdges": 20, "maxTimeseriesCost": 250_000,
-                "engineResultTimeoutS": 30, "timeseriesTimeoutS": 30},
+                "engineResultTimeoutS": 30, "timeseriesTimeoutS": 30,
+                "maxImportBytes": 2 * 1024 * 1024},
         budget_seconds=10, budget_period="day", concurrency=1, pool="guest",
         message="No account needed. {used} of {budget} of solver time used {period}.",
         links=[{"label": "Sign in", "url": "/auth/signin"}],
+        features={"convert": "CYME and Synergi import is part of the Pro plan. "
+                             "Sign in, then upgrade from your account page."},
     ),
     "free": Plan(
         id="free", name="Free", priority=5,
         limits={"maxNodes": 50, "maxEdges": 100, "maxTimeseriesCost": 1_000_000,
-                "engineResultTimeoutS": 90, "timeseriesTimeoutS": 90},
+                "engineResultTimeoutS": 90, "timeseriesTimeoutS": 90,
+                "maxImportBytes": 2 * 1024 * 1024},
         budget_seconds=30, budget_period="day", concurrency=1, pool="member",
         message="{used} of {budget} of solver time used {period}.",
         links=[{"label": "Account", "url": "/account"}],
+        features={"convert": "CYME and Synergi import is part of the Pro plan. "
+                             "Upgrade from your account page."},
     ),
     "pro": Plan(
         id="pro", name="Pro", priority=1,
         limits={"maxNodes": 1000, "maxEdges": 2000, "maxTimeseriesCost": 3_000_000,
-                "engineResultTimeoutS": 90, "timeseriesTimeoutS": 600},
+                "engineResultTimeoutS": 90, "timeseriesTimeoutS": 600,
+                "maxImportBytes": 24 * 1024 * 1024},
         budget_seconds=60 * 60, budget_period="month", concurrency=2, pool="member",
         message="{used} of {budget} of solver time used {period}.",
         links=[{"label": "Account", "url": "/account"}],
+        features={"convert": True},
     ),
 }
 
