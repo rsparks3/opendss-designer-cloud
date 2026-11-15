@@ -228,3 +228,127 @@ def test_plans_file_may_carry_comments(tmp_path):
     path = tmp_path / "plans.json"
     path.write_text(json.dumps(spec), encoding="utf-8")
     assert sorted(load_plans(path)) == ["free", "guest", "pro"]
+
+
+# -- background studies -------------------------------------------------------
+
+async def _settled(gw, tries: int = 80) -> None:
+    """Wait for the follower to give the worker back."""
+    for _ in range(tries):
+        if gw.scheduler.inflight == 0:
+            return
+        await asyncio.sleep(0.05)
+
+
+async def test_a_study_job_keeps_its_worker_until_it_ends_and_is_metered(gateway):
+    app, client = gateway
+    gw = app.state.gateway
+    res = await client.post("/api/jobs/n-minus-1", json={"sleep": 0.3})
+    assert res.status_code == 200, res.text
+    job = res.json()["job"]
+    assert gw.scheduler.inflight == 1
+    health = (await client.get("/gw/health")).json()
+    assert health["jobs"] == 1
+    # Every later call about the job lands on the worker that runs it.
+    snap = await client.get(f"/api/jobs/{job['id']}")
+    assert snap.status_code == 200 and snap.json()["worker"] == job["worker"]
+    async with client.stream("GET", f"/api/jobs/{job['id']}/events") as s:
+        assert s.status_code == 200
+        assert s.headers["content-type"].startswith("text/event-stream")
+        text = (await s.aread()).decode()
+    evs = events(text)
+    assert evs[-1]["type"] == "result" and evs[-1]["worker"] == job["worker"]
+    await _settled(gw)
+    assert gw.scheduler.inflight == 0
+    (run,) = gw.ledger.recent()
+    assert run["path"] == "/api/jobs/n-minus-1" and run["status"] == "ok"
+    assert run["engine_seconds"] == pytest.approx(0.31)
+    # The result stays reachable after the worker was given back.
+    again = await client.get(f"/api/jobs/{job['id']}")
+    assert again.json()["status"] == "done" and again.json()["worker"] == job["worker"]
+    assert (await client.get("/gw/health")).json()["jobs"] == 0
+
+
+async def test_a_job_is_private_to_its_caller(gateway):
+    app, client = gateway
+    res = await client.post("/api/jobs/sweep", json={"sleep": 0.05})
+    jid = res.json()["job"]["id"]
+    other = await client.get(f"/api/jobs/{jid}", headers={"x-forwarded-for": "203.0.113.9"})
+    assert other.status_code == 404
+    assert (await client.get("/api/jobs/nope")).status_code == 404
+    assert (await client.get("/api/jobs/nope/events")).status_code == 404
+    listed = await client.get("/api/jobs")
+    assert [j["id"] for j in listed.json()["jobs"]] == [jid]
+    nothing = await client.get("/api/jobs", headers={"x-forwarded-for": "203.0.113.9"})
+    assert nothing.json()["jobs"] == []
+    await _settled(app.state.gateway)
+
+
+async def test_cancelling_a_job_gives_the_worker_back(gateway):
+    app, client = gateway
+    gw = app.state.gateway
+    jid = (await client.post("/api/jobs/batch", json={"sleep": 30})).json()["job"]["id"]
+    assert gw.scheduler.inflight == 1
+    assert (await client.delete(f"/api/jobs/{jid}")).status_code == 200
+    await _settled(gw)
+    assert gw.scheduler.inflight == 0
+    (run,) = gw.ledger.recent()
+    assert run["status"] == "cancelled" and run["path"] == "/api/jobs/batch"
+
+
+async def test_a_refused_study_takes_no_worker(gateway):
+    app, client = gateway
+    gw = app.state.gateway
+    res = await client.post("/api/jobs/batch", json={"refuse": True})
+    assert res.status_code == 403 and "Pro plan" in res.json()["detail"]
+    assert gw.scheduler.inflight == 0 and not gw.jobs
+    (run,) = gw.ledger.recent()
+    assert run["status"] == "http-403"
+
+
+async def test_a_running_study_counts_against_the_callers_concurrency(gateway):
+    app, client = gateway
+    gw = app.state.gateway
+    # Guests may hold one worker: a solve during their study waits in the
+    # queue, and the queue wait here is short.
+    jid = (await client.post("/api/jobs/hosting-capacity", json={"sleep": 30})).json()["job"]["id"]
+    app.state.gateway.scheduler.wait_s = 0.2
+    res = await client.post("/api/solve", json={})
+    assert res.status_code == 503
+    await client.delete(f"/api/jobs/{jid}")
+    await _settled(gw)
+
+
+async def test_shutdown_stops_running_studies(gateway_factory):
+    app = gateway_factory()
+    gw = app.state.gateway
+    recorded: list[dict] = []
+    real_record = gw.ledger.record
+    gw.ledger.record = lambda **kw: (recorded.append(kw), real_record(**kw))  # type: ignore[method-assign]
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://gateway") as client:
+            res = await client.post("/api/jobs/batch", json={"sleep": 30})
+            assert res.status_code == 200
+            jid = res.json()["job"]["id"]
+    # The ledger is closed with the gateway, so the write is seen on its way in.
+    assert gw.scheduler.inflight == 0
+    assert [r["status"] for r in recorded] == ["gateway-stopped"]
+    assert gw.jobs[jid].lease is None
+
+
+async def test_direct_studies_take_a_slot_and_are_metered(gateway):
+    app, client = gateway
+    res = await client.post("/api/cvr", json={"sleep": 0.02})
+    assert res.status_code == 200
+    (run,) = app.state.gateway.ledger.recent()
+    assert run["path"] == "/api/cvr" and run["engine_seconds"] >= 0.02
+    assert app.state.gateway.scheduler.inflight == 0
+
+
+def test_seed_plans_keep_the_studies_for_pro():
+    from opendss_gateway.plans import DEFAULT_PLANS
+    assert DEFAULT_PLANS["pro"].allows("studies")
+    assert not DEFAULT_PLANS["guest"].allows("studies")
+    assert not DEFAULT_PLANS["free"].allows("studies")
+    assert "Pro plan" in DEFAULT_PLANS["free"].features["studies"]

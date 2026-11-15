@@ -88,6 +88,8 @@ DEFAULT_PLANS: dict[str, Plan] = {
         message="No account needed. {used} of {budget} of solver time used {period}.",
         links=[{"label": "Sign in", "url": "/auth/signin"}],
         features={"convert": "CYME and Synergi import is part of the Pro plan. "
+                             "Sign in, then upgrade from your account page.",
+                  "studies": "Planning studies are part of the Pro plan. "
                              "Sign in, then upgrade from your account page."},
     ),
     "free": Plan(
@@ -99,17 +101,19 @@ DEFAULT_PLANS: dict[str, Plan] = {
         message="{used} of {budget} of solver time used {period}.",
         links=[{"label": "Account", "url": "/account"}],
         features={"convert": "CYME and Synergi import is part of the Pro plan. "
+                             "Upgrade from your account page.",
+                  "studies": "Planning studies are part of the Pro plan. "
                              "Upgrade from your account page."},
     ),
     "pro": Plan(
         id="pro", name="Pro", priority=1,
-        limits={"maxNodes": 1000, "maxEdges": 2000, "maxTimeseriesCost": 3_000_000,
+        limits={"maxNodes": 3000, "maxEdges": 6000, "maxTimeseriesCost": 3_000_000,
                 "engineResultTimeoutS": 90, "timeseriesTimeoutS": 600,
                 "maxImportBytes": 24 * 1024 * 1024},
         budget_seconds=60 * 60, budget_period="month", concurrency=2, pool="member",
         message="{used} of {budget} of solver time used {period}.",
         links=[{"label": "Account", "url": "/account"}],
-        features={"convert": True},
+        features={"convert": True, "studies": True},
     ),
 }
 

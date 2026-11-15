@@ -89,6 +89,72 @@ def make_fake_worker() -> FastAPI:
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    # A direct-call study behaves like a solve.
+    fake.add_api_route("/api/cvr", solve, methods=["POST"])
+
+    # Background studies: a POST starts one, which advances on its own;
+    # everything after that goes by id. The one fake serves both worker
+    # URLs, so `worker` says which hostname answered.
+    jobs: dict[str, dict] = {}
+
+    async def advance(job: dict, delay: float) -> None:
+        await asyncio.sleep(delay / 2)
+        if job["status"] == "queued":
+            job["status"] = "running"
+            job["progress"] = {"done": 1, "total": 2, "message": "half way"}
+        await asyncio.sleep(delay / 2)
+        if job["status"] == "running":
+            job["status"] = "done"
+            job["engineSeconds"] = round(delay + 0.01, 3)
+            job["result"] = {"converged": True}
+
+    @fake.post("/api/jobs/{kind}")
+    async def start_job(kind: str, request: Request):
+        body = await request.json()
+        if body.get("refuse"):
+            return JSONResponse({"detail": "Planning studies are part of the Pro plan."},
+                                status_code=403)
+        job = {"id": f"job{len(jobs) + 1}", "kind": kind, "status": "queued",
+               "engineSeconds": 0.0, "progress": {"done": 0, "total": 2, "message": None},
+               "worker": request.url.hostname}
+        jobs[job["id"]] = job
+        asyncio.get_running_loop().create_task(advance(job, float(body.get("sleep", 0))))
+        return {"job": job}
+
+    @fake.get("/api/jobs")
+    async def list_jobs(request: Request):
+        return {"jobs": [dict(j, worker=request.url.hostname) for j in jobs.values()]}
+
+    @fake.get("/api/jobs/{job_id}")
+    async def get_job(job_id: str, request: Request):
+        job = jobs.get(job_id)
+        if job is None:
+            return JSONResponse({"detail": "No such job."}, status_code=404)
+        return dict(job, worker=request.url.hostname, received=seen(request))
+
+    @fake.delete("/api/jobs/{job_id}")
+    async def cancel_job(job_id: str):
+        job = jobs.get(job_id)
+        if job is None:
+            return JSONResponse({"detail": "No such job."}, status_code=404)
+        if job["status"] in ("queued", "running"):
+            job["status"] = "cancelled"
+        return {"cancelled": True}
+
+    @fake.get("/api/jobs/{job_id}/events")
+    async def job_events(job_id: str, request: Request):
+        job = jobs.get(job_id)
+        if job is None:
+            return JSONResponse({"detail": "No such job."}, status_code=404)
+
+        async def gen():
+            while job["status"] in ("queued", "running"):
+                yield "data: " + json.dumps({"type": "progress", **job}) + "\n\n"
+                await asyncio.sleep(0.02)
+            yield "data: " + json.dumps({"type": "result", **job, "worker": request.url.hostname}) + "\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
     return fake
 
 

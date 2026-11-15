@@ -116,7 +116,7 @@ async def test_checkout_webhook_portal_loop(gateway_factory, fake_stripe):
         assert me["plan"] == {"id": "pro", "name": "Pro"}
         assert me["usage"]["budgetSeconds"] == 3600
         health = (await client.get("/api/health")).json()
-        assert health["plan"]["name"] == "Pro" and health["limits"]["maxNodes"] == 1000
+        assert health["plan"]["name"] == "Pro" and health["limits"]["maxNodes"] == 3000
 
         # A redelivery is acknowledged and not re-applied.
         res = await post_webhook(client, event("checkout.session.completed", obj))

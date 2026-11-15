@@ -22,7 +22,8 @@
       }
     ],
     "features": {
-      "convert": "CYME and Synergi import is part of the Pro plan. Sign in, then upgrade from your account page."
+      "convert": "CYME and Synergi import is part of the Pro plan. Sign in, then upgrade from your account page.",
+      "studies": "Planning studies are part of the Pro plan. Sign in, then upgrade from your account page."
     }
   },
   "free": {
@@ -48,7 +49,8 @@
       }
     ],
     "features": {
-      "convert": "CYME and Synergi import is part of the Pro plan. Upgrade from your account page."
+      "convert": "CYME and Synergi import is part of the Pro plan. Upgrade from your account page.",
+      "studies": "Planning studies are part of the Pro plan. Upgrade from your account page."
     }
   },
   "pro": {
@@ -57,8 +59,8 @@
     "pool": "member",
     "concurrency": 2,
     "limits": {
-      "maxNodes": 1000,
-      "maxEdges": 2000,
+      "maxNodes": 3000,
+      "maxEdges": 6000,
       "maxTimeseriesCost": 3000000,
       "engineResultTimeoutS": 90,
       "timeseriesTimeoutS": 600,
@@ -74,7 +76,8 @@
       }
     ],
     "features": {
-      "convert": true
+      "convert": true,
+      "studies": true
     }
   }
 }

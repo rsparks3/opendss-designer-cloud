@@ -47,9 +47,26 @@ logger = logging.getLogger(__name__)
 
 #: Calls that hold a worker's engine (or, for a conversion, its CPU) and
 #: report how long for: one scheduler slot each, debited to the ledger.
-ENGINE_PATHS = frozenset({"/api/solve", "/api/faultstudy", "/api/import/dss",
-                          "/api/import/convert"})
+ENGINE_PATHS = frozenset({
+    "/api/solve", "/api/faultstudy", "/api/import/dss", "/api/import/convert",
+    # The direct-call studies and the model imports (0.9.0): each runs the
+    # engine, some of them many times over, so each takes a worker and is
+    # metered like a solve. Background studies live under JOBS_PATH.
+    "/api/faultpoint", "/api/screen", "/api/switching", "/api/transfer", "/api/cvr",
+    "/api/capacity", "/api/allocate", "/api/faultline", "/api/fusesaving", "/api/rvc",
+    "/api/import/cim", "/api/import/multispeak",
+})
 STREAM_PATH = "/api/timeseries"
+#: Background studies: a POST under here starts one and answers with a job;
+#: the job's progress, result and cancellation are fetched by id afterwards.
+#: The job runs in the worker's own memory, so every later call about it
+#: has to reach that same worker -- and while it runs, that worker is busy.
+JOBS_PATH = "/api/jobs"
+#: How often the gateway asks the worker whether a job has ended.
+JOB_POLL_S = 1.0
+#: How long a finished job's worker is remembered after it ends, so the
+#: result can still be fetched once the event stream has closed.
+JOB_MEMORY_S = 900.0
 
 _HOP_BY_HOP = frozenset({
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
@@ -99,6 +116,21 @@ class _RateWindow:
         return True
 
 
+@dataclass
+class RunningJob:
+    """A background study on one worker, with the lease that keeps that
+    worker for it until it ends (None once it has)."""
+    id: str
+    path: str
+    worker: str
+    caller: "Caller"
+    period: str
+    request_id: str
+    lease: Lease | None
+    task: asyncio.Task | None = None
+    finished_at: float | None = None
+
+
 class Gateway:
     """Holds the long-lived pieces; the FastAPI app is a thin shell over it."""
 
@@ -136,8 +168,24 @@ class Gateway:
         self._magic_ip = _RateWindow(cfg.magic_per_ip_hour, 3600)
         self._magic_email = _RateWindow(cfg.magic_per_email_hour, 3600)
         self._rr = itertools.cycle(cfg.workers)
+        self.jobs: dict[str, RunningJob] = {}
 
     async def aclose(self) -> None:
+        # Studies in flight are stopped first: their leases would otherwise
+        # keep the drain waiting its whole timeout for work that no longer
+        # has anyone to answer to.
+        running = [rj for rj in self.jobs.values() if rj.lease is not None]
+        for rj in running:
+            if rj.task is not None:
+                rj.task.cancel()
+        await asyncio.gather(*(rj.task for rj in running if rj.task is not None),
+                             return_exceptions=True)
+        for rj in running:
+            # A follower cancelled before its first step never ran at all,
+            # so its clean-up is done here.
+            if rj.lease is not None:
+                await _cancel_on_worker(self, rj, self.job_headers(rj.caller.plan, 0.0, rj.request_id))
+                _settle_job(self, rj, 0.0, "gateway-stopped")
         left = await self.scheduler.drain(self.cfg.drain_s)
         if left:
             logger.warning("shutting down with %d run(s) still in flight", left)
@@ -187,12 +235,17 @@ class Gateway:
         out = {k: v for k, v in request.headers.items()
                if k.lower() not in _HOP_BY_HOP and k.lower() not in _PRIVATE
                and k.lower() != limits_key}
+        out.update(self.job_headers(plan, used, request_id))
+        return out
+
+    def job_headers(self, plan: Plan, used: float, request_id: str) -> dict[str, str]:
+        """The limits header and request id alone: what the gateway sends when
+        it calls a worker on its own behalf (following a job)."""
         overlay: dict = {**plan.limits, "plan": self.plan_block(plan, used)}
         if plan.features:
             overlay["features"] = plan.features
-        out[self.cfg.limits_header] = json.dumps(overlay, separators=(",", ":"))
-        out["X-Request-ID"] = request_id
-        return out
+        return {self.cfg.limits_header: json.dumps(overlay, separators=(",", ":")),
+                "X-Request-ID": request_id}
 
     @staticmethod
     def downstream_headers(upstream: httpx.Response) -> dict[str, str]:
@@ -296,7 +349,8 @@ def create_app(cfg: Config, transport: httpx.AsyncBaseTransport | None = None,
     async def gw_health() -> dict:
         return {"ok": not gw.scheduler.draining, "version": __version__,
                 "workers": len(cfg.workers), "inflight": gw.scheduler.inflight,
-                "queued": gw.scheduler.depth, "draining": gw.scheduler.draining}
+                "queued": gw.scheduler.depth, "draining": gw.scheduler.draining,
+                "jobs": sum(1 for rj in gw.jobs.values() if rj.lease is not None)}
 
     @app.get("/api/me")
     async def me(request: Request) -> Response:
@@ -664,6 +718,11 @@ def create_app(cfg: Config, transport: httpx.AsyncBaseTransport | None = None,
             response = await _engine_call(gw, request, full, caller, request_id)
         elif full == STREAM_PATH and request.method == "POST":
             response = await _stream_call(gw, request, full, caller, request_id)
+        elif (full.startswith(JOBS_PATH + "/") and request.method == "POST"
+              and not full.endswith("/events")):
+            response = await _job_submit(gw, request, full, caller, request_id)
+        elif full == JOBS_PATH or full.startswith(JOBS_PATH + "/"):
+            response = await _job_call(gw, request, full, caller, request_id)
         else:
             response = await _passthrough(gw, request, full, caller, request_id)
         return gw.finish(response, caller)
@@ -859,6 +918,220 @@ async def _stream_call(gw: Gateway, request: Request, path: str, caller: Caller,
 
 def _sse_error(message: str) -> bytes:
     return b"data: " + json.dumps({"type": "error", "message": message}).encode() + b"\n\n"
+
+
+# -- background studies ------------------------------------------------------
+#
+# A study is started with one POST and then lives in the worker's memory, so
+# the gateway keeps the worker leased for as long as the job runs, follows
+# it by polling, accounts for its engine seconds when it ends, and sends
+# every later call about the job (snapshot, event stream, cancel) to that
+# worker. The plan's rules apply as they do to a solve: priority, pool cap,
+# per-caller concurrency, budget. A plan's run timeout (timeseriesTimeoutS,
+# the worker's own watchdog) plus a margin bounds how long a worker is held.
+
+def _job_id_in(upstream: httpx.Response) -> str | None:
+    if upstream.status_code >= 400:
+        return None
+    try:
+        job = upstream.json().get("job")
+    except ValueError:
+        return None
+    jid = job.get("id") if isinstance(job, dict) else None
+    return jid if isinstance(jid, str) and jid else None
+
+
+def _prune_jobs(gw: Gateway) -> None:
+    cutoff = time.monotonic() - JOB_MEMORY_S
+    for jid, rj in list(gw.jobs.items()):
+        if rj.lease is None and rj.finished_at is not None and rj.finished_at < cutoff:
+            del gw.jobs[jid]
+
+
+def _settle_job(gw: Gateway, rj: RunningJob, seconds: float, status: str) -> None:
+    """The job is over: give the worker back and account for it, once."""
+    rj.finished_at = time.monotonic()
+    lease, rj.lease = rj.lease, None
+    if lease is not None:
+        lease.release()
+        _record(gw, rj.caller, rj.period, rj.path, seconds, status, lease, rj.request_id)
+
+
+async def _cancel_on_worker(gw: Gateway, rj: RunningJob, headers: dict[str, str]) -> None:
+    try:
+        await gw.client.delete(f"{rj.worker}{JOBS_PATH}/{rj.id}", headers=headers, timeout=10.0)
+    except httpx.HTTPError:
+        pass
+
+
+async def _follow_job(gw: Gateway, rj: RunningJob, deadline_s: float) -> None:
+    """Ask the worker about the job until it ends, then account for it and
+    give the worker back. Cancelled on shutdown, which also stops the job."""
+    seconds, status = 0.0, "ok"
+    started = time.monotonic()
+    _, used = gw.usage(rj.caller)
+    headers = gw.job_headers(rj.caller.plan, used, rj.request_id)
+    try:
+        while True:
+            await asyncio.sleep(JOB_POLL_S)
+            try:
+                res = await gw.client.get(f"{rj.worker}{JOBS_PATH}/{rj.id}", headers=headers)
+            except httpx.HTTPError as exc:
+                logger.warning("worker %s lost job %s: %s", rj.worker, rj.id, exc)
+                status = "upstream-error"
+                break
+            if res.status_code == 404:
+                status = "lost"
+                break
+            if res.status_code >= 400:
+                status = f"http-{res.status_code}"
+                break
+            try:
+                snap = res.json()
+            except ValueError:
+                status = "upstream-error"
+                break
+            seconds = float(snap.get("engineSeconds") or 0)
+            state = str(snap.get("status") or "")
+            if state in ("done", "failed", "cancelled"):
+                status = "ok" if state == "done" else state
+                break
+            if time.monotonic() - started > deadline_s:
+                status = "timeout"
+                await _cancel_on_worker(gw, rj, headers)
+                break
+    except asyncio.CancelledError:
+        status = "gateway-stopped"
+        await _cancel_on_worker(gw, rj, headers)
+        raise
+    finally:
+        _settle_job(gw, rj, seconds, status)
+
+
+async def _job_submit(gw: Gateway, request: Request, path: str, caller: Caller,
+                      request_id: str) -> Response:
+    plan = caller.plan
+    period, used = gw.usage(caller)
+    if plan.budget_seconds is not None and used >= plan.budget_seconds:
+        return JSONResponse({"detail": plan.exhausted_message()}, status_code=429,
+                            headers={"X-Request-ID": request_id})
+    try:
+        body = await _read_body(request, gw.cfg.max_body_bytes)
+    except _BodyTooLarge:
+        return _too_large(gw.cfg.max_body_bytes)
+    job = Job(client=caller.client, plan_id=plan.id, priority=plan.priority,
+              pool=plan.pool, concurrency=plan.concurrency)
+    try:
+        lease = await gw.scheduler.acquire(job)
+    except QueueFull:
+        return _busy("The solver is busy with other visitors right now. Try again in a moment.")
+    except QueueTimeout:
+        return _busy("Waited for a solver for too long. Try again in a moment.", retry=15)
+    except Draining:
+        return _busy("The service is restarting. Try again in a few seconds.", retry=5)
+    try:
+        upstream = await gw.client.request(
+            "POST", lease.worker + path, params=request.query_params,
+            headers=gw.upstream_headers(request, plan, used, request_id), content=body)
+    except httpx.HTTPError as exc:
+        logger.warning("worker %s failed on %s: %s", lease.worker, path, exc)
+        lease.release()
+        _record(gw, caller, period, path, 0.0, "upstream-error", lease, request_id)
+        return _busy("The solver did not answer. Try again in a moment.", retry=5)
+    job_id = _job_id_in(upstream)
+    if job_id is None:
+        # Refused before it started (a withheld feature, a cap, a bad
+        # circuit): nothing is running, so the worker goes straight back.
+        lease.release()
+        status = f"http-{upstream.status_code}" if upstream.status_code >= 400 else "no-job"
+        _record(gw, caller, period, path, float(upstream.headers.get("x-engine-seconds", 0) or 0),
+                status, lease, request_id)
+        return Response(content=upstream.content, status_code=upstream.status_code,
+                        headers=gw.downstream_headers(upstream))
+    _prune_jobs(gw)
+    rj = RunningJob(id=job_id, path=path, worker=lease.worker, caller=caller, period=period,
+                    request_id=request_id, lease=lease)
+    deadline = float(plan.limits.get("timeseriesTimeoutS") or gw.cfg.upstream_timeout_s) + 30.0
+    rj.task = asyncio.create_task(_follow_job(gw, rj, deadline))
+    gw.jobs[job_id] = rj
+    return Response(content=upstream.content, status_code=upstream.status_code,
+                    headers=gw.downstream_headers(upstream))
+
+
+def _no_such_job(request_id: str) -> JSONResponse:
+    return JSONResponse({"detail": "No such job."}, status_code=404,
+                        headers={"X-Request-ID": request_id})
+
+
+async def _job_call(gw: Gateway, request: Request, path: str, caller: Caller,
+                    request_id: str) -> Response:
+    """Everything about a job after it was started: the list, a snapshot,
+    its event stream, a cancellation. Each goes to the job's own worker, and
+    only to the caller who started it."""
+    _, used = gw.usage(caller)
+    headers = gw.upstream_headers(request, caller.plan, used, request_id)
+    parts = [p for p in path[len(JOBS_PATH):].split("/") if p]
+    if not parts:
+        if request.method != "GET":
+            return _no_such_job(request_id)
+        mine = {jid for jid, rj in gw.jobs.items() if rj.caller.client == caller.client}
+        found: list[dict] = []
+        for worker in gw.cfg.workers:
+            try:
+                res = await gw.client.get(worker + JOBS_PATH, headers=headers)
+                if res.status_code == 200:
+                    # Each worker answers for the jobs it runs, and only those.
+                    found.extend(j for j in res.json().get("jobs", [])
+                                 if j.get("id") in mine and gw.jobs[j["id"]].worker == worker)
+            except (httpx.HTTPError, ValueError):
+                continue
+        return JSONResponse({"jobs": found}, headers={"X-Request-ID": request_id})
+    rj = gw.jobs.get(parts[0])
+    if rj is None or rj.caller.client != caller.client:
+        return _no_such_job(request_id)
+    if parts[1:] == ["events"] and request.method == "GET":
+        return _job_events(gw, rj, headers, request_id)
+    if len(parts) != 1 or request.method not in ("GET", "DELETE"):
+        return _no_such_job(request_id)
+    try:
+        upstream = await gw.client.request(request.method, rj.worker + path, headers=headers)
+    except httpx.HTTPError as exc:
+        logger.warning("worker %s failed on %s: %s", rj.worker, path, exc)
+        return _busy("The solver did not answer. Try again in a moment.", retry=5)
+    return Response(content=upstream.content, status_code=upstream.status_code,
+                    headers=gw.downstream_headers(upstream))
+
+
+def _job_events(gw: Gateway, rj: RunningJob, headers: dict[str, str], request_id: str) -> Response:
+    """The job's progress and result as they happen, relayed from its worker.
+    Takes no slot and meters nothing: the follower does the accounting."""
+
+    async def gen() -> AsyncIterator[bytes]:
+        upstream: httpx.Response | None = None
+        try:
+            upstream = await gw.client.send(
+                gw.client.build_request("GET", f"{rj.worker}{JOBS_PATH}/{rj.id}/events",
+                                        headers=headers), stream=True)
+            if upstream.status_code != 200:
+                raw = await upstream.aread()
+                try:
+                    detail = json.loads(raw).get("detail") or raw.decode("utf-8", "replace")
+                except ValueError:
+                    detail = raw.decode("utf-8", "replace")
+                yield _sse_error(str(detail)[:500])
+                return
+            async for chunk in upstream.aiter_raw():
+                yield chunk
+        except httpx.HTTPError as exc:
+            logger.warning("worker %s dropped the events of job %s: %s", rj.worker, rj.id, exc)
+            yield _sse_error("The solver connection dropped. Ask for the job again in a moment.")
+        finally:
+            if upstream is not None:
+                await upstream.aclose()
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no",
+                                      "X-Request-ID": request_id})
 
 
 def _record(gw: Gateway, caller: Caller, period: str, path: str, seconds: float,
