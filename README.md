@@ -51,6 +51,15 @@ either is skipped, never allowed to block the line behind it. Beyond
 `GATEWAY_MAX_QUEUE` waiters the gateway answers `503` with `Retry-After`;
 a non-streaming call also gives up after `GATEWAY_QUEUE_WAIT_S`.
 
+A **background study** (a POST under `/api/jobs`, 0.9.0 workers) takes a slot
+the same way and keeps it until the job ends: the job lives in that worker's
+memory, so the gateway polls the worker, meters the job's engine seconds when
+it finishes, and sends the snapshot, the event stream and a cancellation to
+that same worker, for the caller who started it. The plan's `timeseriesTimeoutS`
+plus a margin bounds the hold; a restart cancels running studies. The
+direct-call studies (`/api/cvr`, `/api/capacity`, ...) and the CIM and
+MultiSpeak imports are engine calls like a solve.
+
 On `SIGTERM` the gateway stops admitting, fails the queue with a
 "restarting" message, waits up to `GATEWAY_DRAIN_S` for in-flight runs, then
 exits. A deploy costs at most the runs that were longer than that.

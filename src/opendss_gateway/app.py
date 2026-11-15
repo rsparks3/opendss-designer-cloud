@@ -123,7 +123,7 @@ class RunningJob:
     id: str
     path: str
     worker: str
-    caller: "Caller"
+    caller: Caller
     period: str
     request_id: str
     lease: Lease | None
